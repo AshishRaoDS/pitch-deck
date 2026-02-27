@@ -1,0 +1,37 @@
+*, *::before, *::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+:root {
+  --bg: #0f172a;
+  --surface: #1e293b;
+  --surface2: #273348;
+  --accent: #4f8eff;
+  --accent2: #4fe3c0;
+  --text: #e2e8f0;
+  --text-muted: #94a3b8;
+  --danger: #f87171;
+  --success: #34d399;
+  --border: #334155;
+  --radius: 12px;
+  --shadow: 0 4px 24px rgba(0,0,0,0.4);
+}
+
+body {
+  font-family: "Inter", system-ui, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  min-height: 100vh;
+  line-height: 1.5;
+}
+
+button {
+  cursor: pointer;
+  font-family: inherit;
+}
+
+a {
+  color: var(--accent);
+}
