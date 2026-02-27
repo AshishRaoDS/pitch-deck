@@ -1,6 +1,7 @@
 import { useMeetingSession, ProgressStep } from "./hooks/useMeetingSession";
 import DeckDownload from "./components/DeckDownload";
 import KnowledgeBasePanel from "./components/KnowledgeBasePanel";
+import { AutoDetectBanner, MeetingEndedBanner } from "./components/AutoDetectBanner";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -17,7 +18,7 @@ function formatTime(seconds: number): string {
 // ---------------------------------------------------------------------------
 
 export default function App() {
-  const { state, start, stop, reset, openFile } = useMeetingSession();
+  const { state, start, stop, reset, openFile, dismissAutoDetect, confirmAutoDetect, dismissMeetingEnded } = useMeetingSession();
   const {
     status,
     transcript,
@@ -27,6 +28,7 @@ export default function App() {
     speakerContext,
     error,
     elapsedSeconds,
+    autoDetect,
   } = state;
 
   const isIdle = status === "idle" || status === "error";
@@ -250,6 +252,27 @@ export default function App() {
           to { transform: rotate(360deg); }
         }
       `}</style>
+
+      {/* ── AUTO-DETECT BANNERS (fixed overlays, Electron only) ── */}
+      {autoDetect.pending && (
+        <AutoDetectBanner
+          appName={autoDetect.appName}
+          isBrowser={autoDetect.isBrowser}
+          onStartRecording={confirmAutoDetect}
+          onDismiss={dismissAutoDetect}
+          countdownSeconds={10}
+        />
+      )}
+      {autoDetect.meetingEnded && (
+        <MeetingEndedBanner
+          appName={autoDetect.appName}
+          onGenerateDeck={() => {
+            dismissMeetingEnded();
+            stop();
+          }}
+          onDismiss={dismissMeetingEnded}
+        />
+      )}
     </div>
   );
 }

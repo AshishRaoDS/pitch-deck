@@ -6,9 +6,12 @@
  *   2. Open WebSocket to backend
  *   3. Stream audio chunks → receive transcript events
  *   4. Send "stop" command → receive progress + topics + deck_ready events
+ *
+ * Also handles auto-detection events from the Electron main process
+ * (meeting-detected / meeting-ended) via the electronAPI bridge.
  */
 
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 export type SessionStatus =
   | "idle"
@@ -53,6 +56,15 @@ export interface SpeakerContext {
   tone: string;
 }
 
+export interface AutoDetectState {
+  /** Whether a meeting has been detected but not yet confirmed by the user */
+  pending: boolean;
+  appName: string;
+  isBrowser: boolean;
+  /** Whether the meeting has ended and we're prompting to generate the deck */
+  meetingEnded: boolean;
+}
+
 export interface SessionState {
   status: SessionStatus;
   transcript: string;
@@ -63,6 +75,7 @@ export interface SessionState {
   speakerContext: SpeakerContext | null;
   error: string | null;
   elapsedSeconds: number;
+  autoDetect: AutoDetectState;
 }
 
 const WS_URL = "/ws/session";
@@ -110,6 +123,26 @@ function createWorkletBlobUrl(): string {
 // Hook
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// ElectronAPI type (matches preload.ts)
+// ---------------------------------------------------------------------------
+
+interface ElectronAPI {
+  openFile: (path: string) => Promise<string>;
+  onMeetingDetected: (cb: (e: { appName: string; isBrowser: boolean; source: string }) => void) => () => void;
+  onMeetingEnded: (cb: (e: { appName: string }) => void) => () => void;
+  dismissMeetingDetect: () => void;
+  confirmMeetingDetect: () => void;
+}
+
+function getElectronAPI(): ElectronAPI | undefined {
+  return (window as unknown as { electronAPI?: ElectronAPI }).electronAPI;
+}
+
+// ---------------------------------------------------------------------------
+// Hook
+// ---------------------------------------------------------------------------
+
 export function useMeetingSession() {
   const [state, setState] = useState<SessionState>({
     status: "idle",
@@ -121,6 +154,7 @@ export function useMeetingSession() {
     speakerContext: null,
     error: null,
     elapsedSeconds: 0,
+    autoDetect: { pending: false, appName: "", isBrowser: false, meetingEnded: false },
   });
 
   const wsRef = useRef<WebSocket | null>(null);
@@ -133,6 +167,49 @@ export function useMeetingSession() {
 
   const set = (patch: Partial<SessionState>) =>
     setState((prev) => ({ ...prev, ...patch }));
+
+  // ---- Electron auto-detect IPC listeners ----------------------------------
+
+  useEffect(() => {
+    const api = getElectronAPI();
+    if (!api) return; // Not running in Electron
+
+    const removeMeetingDetected = api.onMeetingDetected((event) => {
+      setState((prev) => {
+        // Don't show banner if already recording or processing
+        if (prev.status !== "idle" && prev.status !== "error") return prev;
+        return {
+          ...prev,
+          autoDetect: {
+            pending: true,
+            appName: event.appName,
+            isBrowser: event.isBrowser,
+            meetingEnded: false,
+          },
+        };
+      });
+    });
+
+    const removeMeetingEnded = api.onMeetingEnded((_event) => {
+      setState((prev) => {
+        // Only show "meeting ended" banner if we were recording
+        if (prev.status !== "recording") return prev;
+        return {
+          ...prev,
+          autoDetect: {
+            ...prev.autoDetect,
+            pending: false,
+            meetingEnded: true,
+          },
+        };
+      });
+    });
+
+    return () => {
+      removeMeetingDetected();
+      removeMeetingEnded();
+    };
+  }, []);
 
   // ---- start ---------------------------------------------------------------
 
@@ -316,8 +393,39 @@ export function useMeetingSession() {
       speakerContext: null,
       error: null,
       elapsedSeconds: 0,
+      autoDetect: { pending: false, appName: "", isBrowser: false, meetingEnded: false },
     });
   }, []);
 
-  return { state, start, stop, reset, openFile };
+  // ---- dismissAutoDetect ---------------------------------------------------
+
+  const dismissAutoDetect = useCallback(() => {
+    getElectronAPI()?.dismissMeetingDetect();
+    setState((prev) => ({
+      ...prev,
+      autoDetect: { pending: false, appName: "", isBrowser: false, meetingEnded: false },
+    }));
+  }, []);
+
+  // ---- confirmAutoDetect (start recording from auto-detect) ----------------
+
+  const confirmAutoDetect = useCallback(async () => {
+    getElectronAPI()?.confirmMeetingDetect();
+    setState((prev) => ({
+      ...prev,
+      autoDetect: { pending: false, appName: "", isBrowser: false, meetingEnded: false },
+    }));
+    await start();
+  }, [start]);
+
+  // ---- dismissMeetingEnded -------------------------------------------------
+
+  const dismissMeetingEnded = useCallback(() => {
+    setState((prev) => ({
+      ...prev,
+      autoDetect: { ...prev.autoDetect, meetingEnded: false },
+    }));
+  }, []);
+
+  return { state, start, stop, reset, openFile, dismissAutoDetect, confirmAutoDetect, dismissMeetingEnded };
 }

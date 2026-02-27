@@ -1,9 +1,11 @@
 import { app, BrowserWindow, ipcMain, shell } from "electron";
 import { spawn, ChildProcess } from "child_process";
 import path from "path";
+import { MeetingDetector, MeetingDetectedEvent, MeetingEndedEvent } from "./meeting-detector";
 
 let backendProcess: ChildProcess | null = null;
 let mainWindow: BrowserWindow | null = null;
+let meetingDetector: MeetingDetector | null = null;
 
 // ---------------------------------------------------------------------------
 // Backend process management
@@ -54,6 +56,46 @@ function stopBackend(): void {
 }
 
 // ---------------------------------------------------------------------------
+// Meeting detector
+// ---------------------------------------------------------------------------
+
+function startMeetingDetector(): void {
+  meetingDetector = new MeetingDetector();
+
+  meetingDetector.on("meeting-detected", (event: MeetingDetectedEvent) => {
+    console.log("[detector] Meeting detected:", event.appName, event.isBrowser ? "(browser)" : "(native)");
+
+    // Send to renderer
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send("meeting-detected", event);
+
+      // Bring window to front so user sees the notification
+      if (mainWindow.isMinimized()) mainWindow.restore();
+      mainWindow.show();
+      mainWindow.focus();
+    }
+  });
+
+  meetingDetector.on("meeting-ended", (event: MeetingEndedEvent) => {
+    console.log("[detector] Meeting ended:", event.appName);
+
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send("meeting-ended", event);
+    }
+  });
+
+  meetingDetector.start();
+  console.log("[detector] Meeting detector started");
+}
+
+function stopMeetingDetector(): void {
+  if (meetingDetector) {
+    meetingDetector.stop();
+    meetingDetector = null;
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Window management
 // ---------------------------------------------------------------------------
 
@@ -95,7 +137,11 @@ app.whenReady().then(() => {
   startBackend();
 
   // Give the backend a moment to start before opening the window
-  setTimeout(createWindow, 1500);
+  setTimeout(() => {
+    createWindow();
+    // Start meeting detector after window is ready
+    startMeetingDetector();
+  }, 1500);
 
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) {
@@ -111,6 +157,7 @@ app.on("window-all-closed", () => {
 });
 
 app.on("before-quit", () => {
+  stopMeetingDetector();
   stopBackend();
 });
 
@@ -120,7 +167,6 @@ app.on("before-quit", () => {
 
 /**
  * Open a file with the system's default application (e.g. PowerPoint, Keynote).
- * Called from the renderer via window.electronAPI.openFile(path).
  */
 ipcMain.handle("open-file", async (_event, filePath: string) => {
   const result = await shell.openPath(filePath);
@@ -128,4 +174,22 @@ ipcMain.handle("open-file", async (_event, filePath: string) => {
     console.error("[electron] Failed to open file:", result);
   }
   return result;
+});
+
+/**
+ * Renderer tells us the user dismissed the auto-detect notification.
+ * We suppress further notifications for this meeting session.
+ */
+ipcMain.on("meeting-detect-dismissed", () => {
+  console.log("[detector] User dismissed meeting detection notification");
+  // The detector keeps running but the renderer won't show the banner again
+  // until the next meeting-detected event
+});
+
+/**
+ * Renderer tells us the user confirmed auto-start recording.
+ * Nothing to do in main process — renderer handles the recording start.
+ */
+ipcMain.on("meeting-detect-confirmed", () => {
+  console.log("[detector] User confirmed auto-start recording");
 });
