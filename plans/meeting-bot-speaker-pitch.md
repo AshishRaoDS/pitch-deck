@@ -431,3 +431,158 @@ User clicks STOP
 9. **`frontend/package.json`** — add Electron deps
 10. **`frontend/vite.config.ts`** — Electron build config
 11. **`meeting-bot/README.md`** — updated docs
+
+---
+
+## Org Knowledge Base Feature
+
+### Overview
+
+In addition to web search (Serper.dev), users can upload their own org documents (product specs, case studies, whitepapers, internal research) so the pitch deck can cite **both** external web evidence and internal org knowledge.
+
+### Approach: RAG with ChromaDB
+
+ChromaDB runs in-process (no separate server), uses OpenAI `text-embedding-3-small` for embeddings, and persists to disk across sessions.
+
+### Data Flow with Knowledge Base
+
+```
+User clicks STOP
+    │
+    ├─► Whisper flush → full transcript
+    ├─► speaker_context.py → who is speaking + pitch summary
+    ├─► topics.py → speaker-POV claims (3-8 topics)
+    │
+    ├─► For each topic (parallel):
+    │     ├─► Serper.dev web search → external evidence
+    │     └─► ChromaDB query → internal org knowledge (top-3 chunks)
+    │
+    ├─► pitch_deck.py → GPT-4o with BOTH sources
+    │     "Our product roadmap shows X [internal]"
+    │     "Industry analysts confirm Y [web]"
+    │
+    └─► .pptx with slides citing both web + org KB
+```
+
+### New Files
+
+| File | Purpose |
+|------|---------|
+| `backend/app/knowledge_base.py` | Ingest docs, chunk into 500-token segments, embed, store in ChromaDB; query by topic |
+| `backend/app/kb_router.py` | FastAPI router for KB management endpoints |
+| `frontend/src/components/KnowledgeBasePanel.tsx` | Upload UI, document list with chunk counts, delete button |
+
+### Modified Files
+
+| File | What Changes |
+|------|-------------|
+| `backend/app/search.py` | `enrich_topics()` gains `kb_results` field alongside `search_results` |
+| `backend/app/pitch_deck.py` | System prompt updated to reference both web and org KB sources |
+| `backend/app/main.py` | Mount `kb_router`; pass KB results through pipeline |
+| `backend/app/config.py` | Add `kb_persist_dir` setting |
+| `backend/requirements.txt` | Add `chromadb`, `pymupdf`, `python-docx`, `tiktoken` |
+| `frontend/src/App.tsx` | Add KnowledgeBasePanel section |
+
+### New Backend API Endpoints
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| `POST` | `/api/kb/upload` | Upload one or more files; returns chunk counts |
+| `GET` | `/api/kb/documents` | List all indexed documents with metadata |
+| `DELETE` | `/api/kb/documents/{doc_id}` | Remove a document and its chunks |
+| `GET` | `/api/kb/status` | Returns total doc count + chunk count |
+
+### Supported File Formats
+
+- `.pdf` — extracted via PyMuPDF
+- `.docx` — extracted via python-docx
+- `.txt` / `.md` — read directly
+
+### `knowledge_base.py` Core Design
+
+```python
+# Ingestion
+async def ingest_document(file_bytes: bytes, filename: str, doc_id: str) -> int:
+    text = extract_text(file_bytes, filename)   # PDF/DOCX/TXT/MD
+    chunks = chunk_text(text, max_tokens=500)   # sliding window, 50-token overlap
+    embeddings = await embed_chunks(chunks)     # text-embedding-3-small
+    collection.add(documents=chunks, embeddings=embeddings, ids=[...])
+    return len(chunks)
+
+# Retrieval
+async def query_kb(query: str, top_k: int = 3) -> list[dict]:
+    embedding = await embed_query(query)
+    results = collection.query(query_embeddings=[embedding], n_results=top_k)
+    return [{"text": doc, "source": meta["filename"], "score": dist}
+            for doc, meta, dist in zip(results["documents"][0],
+                                       results["metadatas"][0],
+                                       results["distances"][0])]
+```
+
+### Updated `enrich_topics()` in `search.py`
+
+```python
+async def enrich_topics(topics: list[dict], use_kb: bool = True) -> list[dict]:
+    enriched = []
+    for topic in topics:
+        web_results = await search_topic(topic["search_query"])
+        kb_results = await query_kb(topic["search_query"]) if use_kb else []
+        enriched.append({
+            **topic,
+            "search_results": web_results,   # existing field
+            "kb_results": kb_results,         # NEW: org knowledge
+        })
+    return enriched
+```
+
+### Updated GPT-4o Prompt Addition in `pitch_deck.py`
+
+```
+For each topic slide, you have TWO sources of evidence:
+1. "search_results" — recent web articles and data
+2. "kb_results" — internal documents from the speaker's organisation
+
+Prioritise kb_results for claims about the speaker's own products,
+capabilities, or track record. Use search_results for market context,
+industry trends, and third-party validation.
+
+When citing internal knowledge, use language like "Our data shows..."
+or "As documented in our [source]...".
+```
+
+### Frontend KnowledgeBasePanel UI
+
+```
+┌─ Org Knowledge Base ──────────────────────────────┐
+│  [+ Upload Documents]  (.pdf .docx .txt .md)       │
+│                                                     │
+│  ✓ product-overview.pdf          (42 chunks)  [✕]  │
+│  ✓ q4-case-studies.docx          (18 chunks)  [✕]  │
+│  ✓ competitive-analysis.md       (11 chunks)  [✕]  │
+│                                                     │
+│  3 documents · 71 chunks indexed                   │
+└────────────────────────────────────────────────────┘
+```
+
+Documents persist across sessions (ChromaDB writes to disk at `~/.meeting-bot/kb/`).
+
+### New Dependencies
+
+```
+chromadb==0.5.x          # vector store (runs in-process, no server needed)
+pymupdf==1.24.x          # PDF text extraction
+python-docx==1.1.x       # DOCX text extraction
+tiktoken==0.7.x          # token counting for chunking
+```
+
+### Implementation Order for KB Feature
+
+1. **`backend/app/knowledge_base.py`** — core ingest + query logic
+2. **`backend/app/kb_router.py`** — FastAPI endpoints
+3. **`backend/app/config.py`** — add `kb_persist_dir`
+4. **`backend/requirements.txt`** — add new deps
+5. **`backend/app/search.py`** — add `kb_results` to `enrich_topics()`
+6. **`backend/app/pitch_deck.py`** — update prompt to use both sources
+7. **`backend/app/main.py`** — mount kb_router
+8. **`frontend/src/components/KnowledgeBasePanel.tsx`** — upload + list UI
+9. **`frontend/src/App.tsx`** — add KnowledgeBasePanel

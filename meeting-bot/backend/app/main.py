@@ -4,9 +4,13 @@ FastAPI application entry point.
 Endpoints
 ---------
 GET  /                      Health check
-WS   /ws/session            WebSocket: real-time audio → transcript → topics
+WS   /ws/session            WebSocket: real-time audio → transcript → topics → deck
 POST /api/generate-deck     Generate pitch deck from transcript + topics
 GET  /api/download/{name}   Download a generated .pptx file
+POST /api/kb/upload         Upload documents to org knowledge base
+GET  /api/kb/documents      List indexed documents
+DEL  /api/kb/documents/{id} Remove a document
+GET  /api/kb/status         KB stats
 """
 
 import json
@@ -20,8 +24,10 @@ from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
 
 from .config import settings
+from .kb_router import router as kb_router
 from .pitch_deck import OUTPUT_DIR, generate_pitch_deck
 from .search import enrich_topics
+from .speaker_context import extract_speaker_context
 from .topics import extract_topics
 from .transcriber import Transcriber
 
@@ -40,7 +46,7 @@ async def lifespan(app: FastAPI):
     log.info("Meeting bot API shutting down.")
 
 
-app = FastAPI(title="Meeting Bot API", version="1.0.0", lifespan=lifespan)
+app = FastAPI(title="Meeting Bot API", version="2.0.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -50,6 +56,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Mount knowledge base router
+app.include_router(kb_router)
+
 
 # ---------------------------------------------------------------------------
 # REST helpers
@@ -57,22 +66,28 @@ app.add_middleware(
 
 @app.get("/")
 async def health():
-    return {"status": "ok", "service": "meeting-bot"}
+    return {"status": "ok", "service": "meeting-bot", "version": "2.0.0"}
 
 
 class DeckRequest(BaseModel):
     transcript: str
     enriched_topics: list[dict]
+    speaker_context: dict | None = None
 
 
 @app.post("/api/generate-deck")
 async def api_generate_deck(body: DeckRequest):
     """
-    Generate a .pptx pitch deck from the full transcript and enriched topics.
+    Generate a .pptx pitch deck from the full transcript, enriched topics,
+    and optional speaker context.
     Returns the filename that can be fetched via /api/download/{filename}.
     """
     try:
-        filepath = await generate_pitch_deck(body.transcript, body.enriched_topics)
+        filepath = await generate_pitch_deck(
+            body.transcript,
+            body.enriched_topics,
+            body.speaker_context,
+        )
         filename = os.path.basename(filepath)
         return {"filename": filename, "download_url": f"/api/download/{filename}"}
     except Exception as exc:
@@ -107,13 +122,21 @@ async def ws_session(websocket: WebSocket):
     ------------------
     Client → Server (binary):  raw PCM audio bytes (16-bit, 16 kHz, mono)
     Client → Server (text):    JSON control messages
-        {"type": "stop"}       – end session, trigger topic extraction + search
+        {"type": "stop"}       – end session, trigger processing pipeline
 
     Server → Client (text):    JSON event messages
-        {"type": "transcript", "text": "...", "full": "..."}
-        {"type": "topics",     "topics": [...]}
-        {"type": "deck_ready", "filename": "...", "download_url": "..."}
-        {"type": "error",      "message": "..."}
+        {"type": "transcript",  "text": "...", "full": "..."}
+        {"type": "progress",    "step": "...", "message": "..."}
+        {"type": "topics",      "topics": [...]}
+        {"type": "deck_ready",  "filename": "...", "download_url": "..."}
+        {"type": "error",       "message": "..."}
+
+    Progress steps (in order):
+        transcribing        – flushing final audio
+        speaker_context     – identifying speaker context
+        extracting_topics   – extracting key themes
+        searching           – researching topics (web + KB)
+        building_deck       – generating pitch deck
     """
     await websocket.accept()
     log.info("WebSocket session opened")
@@ -123,6 +146,9 @@ async def ws_session(websocket: WebSocket):
 
     async def send_json(data: dict):
         await websocket.send_text(json.dumps(data))
+
+    async def send_progress(step: str, message: str):
+        await send_json({"type": "progress", "step": step, "message": message})
 
     try:
         while True:
@@ -147,7 +173,8 @@ async def ws_session(websocket: WebSocket):
                 ctrl = json.loads(message["text"])
 
                 if ctrl.get("type") == "stop":
-                    # Flush remaining audio
+                    # Step 1: Flush remaining audio
+                    await send_progress("transcribing", "Finalising transcript…")
                     leftover = await transcriber.flush()
                     if leftover:
                         full_transcript.append(leftover)
@@ -163,24 +190,42 @@ async def ws_session(websocket: WebSocket):
                         await send_json({"type": "error", "message": "No transcript captured."})
                         break
 
-                    # Extract topics
-                    log.info("Extracting topics…")
-                    topics = await extract_topics(combined)
+                    # Step 2: Extract speaker context
+                    await send_progress("speaker_context", "Identifying speaker context…")
+                    log.info("Extracting speaker context…")
+                    speaker_ctx = await extract_speaker_context(combined)
+                    log.info(
+                        "Speaker: %s (%s) — pitching to %s",
+                        speaker_ctx.get("speaker_name"),
+                        speaker_ctx.get("company"),
+                        speaker_ctx.get("audience"),
+                    )
 
-                    # Enrich topics with web search
-                    log.info("Running web searches…")
-                    enriched = await enrich_topics(topics)
+                    # Step 3: Extract topics (speaker-POV)
+                    await send_progress("extracting_topics", "Extracting key themes from your pitch…")
+                    log.info("Extracting topics…")
+                    topics = await extract_topics(combined, speaker_ctx)
+
+                    # Step 4: Enrich topics (web + KB)
+                    await send_progress(
+                        "searching",
+                        f"Researching {len(topics)} topic{'s' if len(topics) != 1 else ''}…",
+                    )
+                    log.info("Running web searches and KB queries…")
+                    enriched = await enrich_topics(topics, use_kb=True)
 
                     await send_json({"type": "topics", "topics": enriched})
 
-                    # Generate pitch deck
+                    # Step 5: Generate pitch deck
+                    await send_progress("building_deck", "Building your pitch deck…")
                     log.info("Generating pitch deck…")
-                    filepath = await generate_pitch_deck(combined, enriched)
+                    filepath = await generate_pitch_deck(combined, enriched, speaker_ctx)
                     filename = os.path.basename(filepath)
                     await send_json({
                         "type": "deck_ready",
                         "filename": filename,
                         "download_url": f"/api/download/{filename}",
+                        "speaker_context": speaker_ctx,
                     })
                     break
 

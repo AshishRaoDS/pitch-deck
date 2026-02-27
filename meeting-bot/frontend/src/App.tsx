@@ -1,115 +1,250 @@
-import { useMeetingSession } from "./hooks/useMeetingSession";
-import StatusBadge from "./components/StatusBadge";
-import TranscriptPanel from "./components/TranscriptPanel";
-import TopicsPanel from "./components/TopicsPanel";
+import { useMeetingSession, ProgressStep } from "./hooks/useMeetingSession";
 import DeckDownload from "./components/DeckDownload";
+import KnowledgeBasePanel from "./components/KnowledgeBasePanel";
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+function formatTime(seconds: number): string {
+  const m = Math.floor(seconds / 60).toString().padStart(2, "0");
+  const s = (seconds % 60).toString().padStart(2, "0");
+  return `${m}:${s}`;
+}
+
+// ---------------------------------------------------------------------------
+// App
+// ---------------------------------------------------------------------------
 
 export default function App() {
-  const { state, start, stop, reset } = useMeetingSession();
-  const { status, transcript, topics, downloadUrl, filename, error } = state;
+  const { state, start, stop, reset, openFile } = useMeetingSession();
+  const {
+    status,
+    transcript,
+    progressSteps,
+    downloadUrl,
+    filename,
+    speakerContext,
+    error,
+    elapsedSeconds,
+  } = state;
 
+  const isIdle = status === "idle" || status === "error";
   const isRecording = status === "recording";
   const isProcessing = status === "processing" || status === "connecting";
   const isDone = status === "done";
-  const isIdle = status === "idle" || status === "error";
 
   return (
     <div
       style={{
-        maxWidth: 820,
+        maxWidth: 560,
         margin: "0 auto",
         padding: "40px 24px",
         display: "flex",
         flexDirection: "column",
-        gap: 28,
+        gap: 24,
+        minHeight: "100vh",
       }}
     >
       {/* Header */}
-      <header style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-        <div>
-          <h1
-            style={{
-              fontSize: 28,
-              fontWeight: 700,
-              background: "linear-gradient(90deg, #4f8eff, #4fe3c0)",
-              WebkitBackgroundClip: "text",
-              WebkitTextFillColor: "transparent",
-              marginBottom: 4,
-            }}
-          >
-            Meeting Bot
-          </h1>
-          <p style={{ color: "var(--text-muted)", fontSize: 14 }}>
-            Record → Transcribe → Research → Pitch Deck
-          </p>
-        </div>
-        <StatusBadge status={status} />
-      </header>
-
-      {/* Controls */}
-      <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
-        {isIdle && (
-          <Button variant="primary" onClick={start} icon={<MicIcon />}>
-            Start Recording
-          </Button>
-        )}
-        {isRecording && (
-          <Button variant="danger" onClick={stop} icon={<StopIcon />}>
-            Stop & Generate
-          </Button>
-        )}
-        {(isDone || status === "error") && (
-          <Button variant="secondary" onClick={reset} icon={<ResetIcon />}>
-            New Session
-          </Button>
-        )}
-        {isProcessing && (
-          <div style={{ display: "flex", alignItems: "center", gap: 10, color: "var(--text-muted)", fontSize: 14 }}>
-            <Spinner />
-            {status === "connecting" ? "Connecting to server…" : "Analysing, searching web, building deck…"}
-          </div>
-        )}
-      </div>
-
-      {/* Error */}
-      {error && (
-        <div
+      <header style={{ textAlign: "center" }}>
+        <div style={{ fontSize: 36, marginBottom: 8 }}>🎙</div>
+        <h1
           style={{
-            background: "#f8717122",
-            border: "1px solid #f87171",
-            borderRadius: "var(--radius)",
-            padding: "14px 18px",
-            color: "#f87171",
-            fontSize: 14,
+            fontSize: 26,
+            fontWeight: 700,
+            background: "linear-gradient(90deg, #4f8eff, #4fe3c0)",
+            WebkitBackgroundClip: "text",
+            WebkitTextFillColor: "transparent",
+            marginBottom: 6,
           }}
         >
-          {error}
+          Meeting Bot
+        </h1>
+        <p style={{ color: "var(--text-muted)", fontSize: 14 }}>
+          Record your meeting · Get a speaker-perspective pitch deck
+        </p>
+      </header>
+
+      {/* ── IDLE STATE ── */}
+      {isIdle && (
+        <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 16 }}>
+          <BigButton variant="primary" onClick={start} icon="●">
+            Start Recording
+          </BigButton>
+          {error && (
+            <div
+              style={{
+                background: "#f8717122",
+                border: "1px solid #f87171",
+                borderRadius: 8,
+                padding: "12px 16px",
+                color: "#f87171",
+                fontSize: 13,
+                width: "100%",
+                textAlign: "center",
+              }}
+            >
+              {error}
+            </div>
+          )}
         </div>
       )}
 
-      {/* Transcript */}
-      {(transcript || isRecording) && (
-        <section>
-          <h2 style={{ fontSize: 16, fontWeight: 600, marginBottom: 10, color: "var(--text-muted)" }}>
-            Live Transcript
-          </h2>
-          <TranscriptPanel text={transcript} />
-        </section>
+      {/* ── CONNECTING STATE ── */}
+      {status === "connecting" && (
+        <div style={{ textAlign: "center", color: "var(--text-muted)", fontSize: 14 }}>
+          <Spinner size={24} />
+          <p style={{ marginTop: 12 }}>Connecting to server…</p>
+        </div>
       )}
 
-      {/* Deck download */}
-      {isDone && downloadUrl && filename && (
-        <DeckDownload downloadUrl={downloadUrl} filename={filename} />
+      {/* ── RECORDING STATE ── */}
+      {isRecording && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+          {/* REC indicator + timer */}
+          <div
+            style={{
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              gap: 10,
+              fontSize: 14,
+              fontWeight: 600,
+            }}
+          >
+            <span
+              style={{
+                display: "inline-block",
+                width: 10,
+                height: 10,
+                borderRadius: "50%",
+                background: "#f87171",
+                animation: "pulse 1.2s ease-in-out infinite",
+              }}
+            />
+            <span style={{ color: "#f87171" }}>REC</span>
+            <span style={{ color: "var(--text-muted)", fontFamily: "monospace", fontSize: 16 }}>
+              {formatTime(elapsedSeconds)}
+            </span>
+          </div>
+
+          <BigButton variant="danger" onClick={stop} icon="■">
+            Stop &amp; Generate Deck
+          </BigButton>
+
+          {/* Live transcript */}
+          {transcript && (
+            <div
+              style={{
+                background: "var(--surface)",
+                border: "1px solid var(--border)",
+                borderRadius: 8,
+                padding: "14px 16px",
+                maxHeight: 200,
+                overflowY: "auto",
+                fontSize: 13,
+                color: "var(--text-muted)",
+                lineHeight: 1.6,
+              }}
+            >
+              <div style={{ fontSize: 11, fontWeight: 600, color: "var(--text-muted)", marginBottom: 8, textTransform: "uppercase", letterSpacing: "0.05em" }}>
+                Live Transcript
+              </div>
+              {transcript}
+            </div>
+          )}
+        </div>
       )}
 
-      {/* Topics */}
-      <TopicsPanel topics={topics} />
+      {/* ── PROCESSING STATE ── */}
+      {isProcessing && (
+        <div
+          style={{
+            background: "var(--surface)",
+            border: "1px solid var(--border)",
+            borderRadius: 12,
+            padding: "24px 28px",
+            display: "flex",
+            flexDirection: "column",
+            gap: 14,
+          }}
+        >
+          <div style={{ fontSize: 14, fontWeight: 600, color: "var(--text)", marginBottom: 4 }}>
+            Processing your meeting…
+          </div>
+          {progressSteps.length > 0 ? (
+            <ul style={{ listStyle: "none", padding: 0, margin: 0, display: "flex", flexDirection: "column", gap: 10 }}>
+              {progressSteps.map((step, i) => (
+                <ProgressItem key={step.step} step={step} isActive={!step.done && i === progressSteps.findIndex((s) => !s.done)} />
+              ))}
+            </ul>
+          ) : (
+            <div style={{ display: "flex", alignItems: "center", gap: 10, color: "var(--text-muted)", fontSize: 13 }}>
+              <Spinner size={16} />
+              Initialising…
+            </div>
+          )}
+        </div>
+      )}
 
-      {/* Pulse animation */}
+      {/* ── DONE STATE ── */}
+      {isDone && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+          {/* Speaker context badge */}
+          {speakerContext && (
+            <div
+              style={{
+                background: "var(--surface)",
+                border: "1px solid var(--border)",
+                borderRadius: 8,
+                padding: "12px 16px",
+                fontSize: 13,
+              }}
+            >
+              <div style={{ fontWeight: 600, color: "var(--text)", marginBottom: 4 }}>
+                ✅ Pitch Deck Ready
+              </div>
+              <div style={{ color: "var(--text-muted)" }}>
+                <strong style={{ color: "var(--text)" }}>{speakerContext.speaker_name}</strong>
+                {speakerContext.company && (
+                  <> · {speakerContext.company}</>
+                )}
+                {speakerContext.role && (
+                  <> · {speakerContext.role}</>
+                )}
+              </div>
+              {speakerContext.pitch_summary && (
+                <div style={{ color: "var(--text-muted)", marginTop: 4, fontStyle: "italic" }}>
+                  "{speakerContext.pitch_summary}"
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Download / open */}
+          {downloadUrl && filename && (
+            <DeckDownload
+              downloadUrl={downloadUrl}
+              filename={filename}
+              onOpenFile={openFile}
+            />
+          )}
+
+          <BigButton variant="secondary" onClick={reset} icon="↺">
+            New Session
+          </BigButton>
+        </div>
+      )}
+
+      {/* ── KNOWLEDGE BASE PANEL (always visible) ── */}
+      <KnowledgeBasePanel />
+
+      {/* Animations */}
       <style>{`
         @keyframes pulse {
-          0%, 100% { opacity: 1; }
-          50% { opacity: 0.3; }
+          0%, 100% { opacity: 1; transform: scale(1); }
+          50% { opacity: 0.4; transform: scale(0.85); }
         }
         @keyframes spin {
           to { transform: rotate(360deg); }
@@ -120,21 +255,21 @@ export default function App() {
 }
 
 // ---------------------------------------------------------------------------
-// Small reusable sub-components
+// Sub-components
 // ---------------------------------------------------------------------------
 
-interface ButtonProps {
+interface BigButtonProps {
   variant: "primary" | "secondary" | "danger";
   onClick: () => void;
-  icon?: React.ReactNode;
+  icon?: string;
   children: React.ReactNode;
 }
 
-const btnStyles: Record<ButtonProps["variant"], React.CSSProperties> = {
+const bigBtnStyles: Record<BigButtonProps["variant"], React.CSSProperties> = {
   primary: {
     background: "var(--accent)",
     color: "#fff",
-    boxShadow: "0 4px 14px #4f8eff33",
+    boxShadow: "0 4px 20px #4f8eff44",
   },
   secondary: {
     background: "var(--surface)",
@@ -148,71 +283,72 @@ const btnStyles: Record<ButtonProps["variant"], React.CSSProperties> = {
   },
 };
 
-function Button({ variant, onClick, icon, children }: ButtonProps) {
+function BigButton({ variant, onClick, icon, children }: BigButtonProps) {
   return (
     <button
       onClick={onClick}
       style={{
         display: "inline-flex",
         alignItems: "center",
-        gap: 8,
-        padding: "10px 20px",
-        borderRadius: 8,
-        fontWeight: 600,
-        fontSize: 15,
+        justifyContent: "center",
+        gap: 10,
+        padding: "14px 32px",
+        borderRadius: 10,
+        fontWeight: 700,
+        fontSize: 16,
         border: "none",
-        transition: "opacity 0.15s",
-        ...btnStyles[variant],
+        cursor: "pointer",
+        width: "100%",
+        transition: "opacity 0.15s, transform 0.1s",
+        ...bigBtnStyles[variant],
       }}
-      onMouseEnter={(e) => ((e.target as HTMLElement).style.opacity = "0.85")}
-      onMouseLeave={(e) => ((e.target as HTMLElement).style.opacity = "1")}
+      onMouseEnter={(e) => {
+        (e.currentTarget as HTMLButtonElement).style.opacity = "0.88";
+        (e.currentTarget as HTMLButtonElement).style.transform = "translateY(-1px)";
+      }}
+      onMouseLeave={(e) => {
+        (e.currentTarget as HTMLButtonElement).style.opacity = "1";
+        (e.currentTarget as HTMLButtonElement).style.transform = "translateY(0)";
+      }}
     >
-      {icon}
+      {icon && <span style={{ fontSize: 18 }}>{icon}</span>}
       {children}
     </button>
   );
 }
 
-function Spinner() {
+function Spinner({ size = 16 }: { size?: number }) {
   return (
     <span
       style={{
         display: "inline-block",
-        width: 16,
-        height: 16,
-        border: "2px solid var(--border)",
+        width: size,
+        height: size,
+        border: `${Math.max(2, size / 8)}px solid var(--border)`,
         borderTopColor: "var(--accent)",
         borderRadius: "50%",
         animation: "spin 0.8s linear infinite",
+        flexShrink: 0,
       }}
     />
   );
 }
 
-function MicIcon() {
+function ProgressItem({ step, isActive }: { step: ProgressStep; isActive: boolean }) {
   return (
-    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-      <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z" />
-      <path d="M19 10v2a7 7 0 0 1-14 0v-2" />
-      <line x1="12" y1="19" x2="12" y2="23" />
-      <line x1="8" y1="23" x2="16" y2="23" />
-    </svg>
-  );
-}
-
-function StopIcon() {
-  return (
-    <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
-      <rect x="4" y="4" width="16" height="16" rx="2" />
-    </svg>
-  );
-}
-
-function ResetIcon() {
-  return (
-    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-      <polyline points="1 4 1 10 7 10" />
-      <path d="M3.51 15a9 9 0 1 0 .49-4.72L1 10" />
-    </svg>
+    <li
+      style={{
+        display: "flex",
+        alignItems: "center",
+        gap: 12,
+        fontSize: 13,
+        color: step.done ? "#4FE3C0" : isActive ? "var(--text)" : "var(--text-muted)",
+      }}
+    >
+      <span style={{ width: 18, textAlign: "center", flexShrink: 0 }}>
+        {step.done ? "✓" : isActive ? <Spinner size={14} /> : "○"}
+      </span>
+      <span>{step.message}</span>
+    </li>
   );
 }

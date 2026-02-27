@@ -2,9 +2,13 @@
 Pitch deck generation using GPT-4o for content and python-pptx for rendering.
 
 Flow:
-1. Send transcript + enriched topics to GPT-4o → structured slide content.
+1. Send transcript + enriched topics + speaker context to GPT-4o → structured slide content.
 2. Use python-pptx to build a .pptx file from the structured content.
 3. Return the file path.
+
+The deck is written from the SPEAKER'S perspective, using first-person language
+("We have built...", "Our customers tell us...") and a classic pitch structure:
+Title → Problem → Solution → Why Now → Topic slides → Key Takeaways → Ask/Next Steps
 """
 
 import io
@@ -31,6 +35,7 @@ THEME = {
     "title_text": RGBColor(0xFF, 0xFF, 0xFF),
     "body_text": RGBColor(0xD0, 0xD8, 0xEA),
     "highlight": RGBColor(0x4F, 0xE3, 0xC0), # teal
+    "kb_accent": RGBColor(0xFF, 0xC8, 0x4F), # amber — used for internal KB citations
 }
 
 OUTPUT_DIR = "/tmp/meeting-bot-decks"
@@ -40,10 +45,94 @@ os.makedirs(OUTPUT_DIR, exist_ok=True)
 # GPT-4o: generate slide content
 # ---------------------------------------------------------------------------
 
-_SYSTEM_PROMPT = """\
+_SYSTEM_PROMPT_BASE = """\
+You are a professional pitch deck writer helping {speaker_name}{company_str} create a
+compelling presentation for {audience}.
+
+The speaker is pitching: {pitch_summary}
+Tone: {tone}
+
+Write ALL slide content from the SPEAKER'S perspective, as if they are presenting
+to {audience}. Use first-person language ("We", "Our", "I have found...").
+
+You have TWO sources of evidence for each topic:
+1. "search_results" — recent web articles and data (external validation)
+2. "kb_results" — internal documents from the speaker's organisation (proprietary evidence)
+
+Prioritise kb_results for claims about the speaker's own products, capabilities,
+or track record. Use search_results for market context, industry trends, and
+third-party validation.
+
+When citing internal knowledge, use language like "Our data shows...",
+"As we've documented internally...", or "Our [source] confirms...".
+When citing web sources, use language like "Industry research shows...",
+"According to [source]...", or "Market data confirms...".
+
+Return a JSON object with this exact shape:
+{
+  "deck_title": "<catchy overall title for the pitch>",
+  "slides": [
+    {
+      "type": "title",
+      "title": "<deck title — speaker name + company + value prop>",
+      "subtitle": "<one-line value proposition in first person>"
+    },
+    {
+      "type": "problem",
+      "title": "The Problem",
+      "bullets": ["<pain point 1 the speaker is addressing>", "<pain point 2>", ...]
+    },
+    {
+      "type": "solution",
+      "title": "Our Solution",
+      "bullets": ["<what the speaker is proposing>", "<key differentiator>", ...]
+    },
+    {
+      "type": "why_now",
+      "title": "Why Now",
+      "bullets": ["<market timing argument>", "<trend supporting the thesis>", ...],
+      "source": "<web source URL if relevant>"
+    },
+    {
+      "type": "topic",
+      "title": "<topic claim as slide title>",
+      "bullets": ["<key insight 1 from speaker's POV>", "<key insight 2>", ...],
+      "source": "<URL or internal doc name>",
+      "source_type": "<web | internal>"
+    },
+    ...more topic slides...,
+    {
+      "type": "summary",
+      "title": "Key Takeaways",
+      "bullets": ["<our main argument 1>", "<our main argument 2>", ...]
+    },
+    {
+      "type": "cta",
+      "title": "Next Steps",
+      "bullets": ["<what we are asking from {audience}>", "<specific action 2>", ...]
+    }
+  ]
+}
+
+Rules:
+- Include one "topic" slide per enriched topic (3-8 slides total for topics).
+- Each bullet should be 10-20 words, punchy and specific, in first person.
+- Always include problem, solution, why_now, summary, and cta slides.
+- Only return valid JSON – no markdown fences, no extra text.
+"""
+
+_SYSTEM_PROMPT_GENERIC = """\
 You are a professional pitch deck writer. Given a meeting transcript and a list
-of enriched topics (each with web-search results), produce structured content
-for a compelling pitch deck.
+of enriched topics (each with web-search results and optional internal knowledge base results),
+produce structured content for a compelling pitch deck written from the speaker's perspective.
+
+You have TWO sources of evidence for each topic:
+1. "search_results" — recent web articles and data (external validation)
+2. "kb_results" — internal documents from the speaker's organisation (proprietary evidence)
+
+Prioritise kb_results for claims about the speaker's own products, capabilities,
+or track record. Use search_results for market context, industry trends, and
+third-party validation.
 
 Return a JSON object with this exact shape:
 {
@@ -55,15 +144,27 @@ Return a JSON object with this exact shape:
       "subtitle": "<one-line value proposition>"
     },
     {
-      "type": "agenda",
-      "title": "Agenda",
-      "bullets": ["<item 1>", "<item 2>", ...]
+      "type": "problem",
+      "title": "The Problem",
+      "bullets": ["<pain point 1>", "<pain point 2>", ...]
+    },
+    {
+      "type": "solution",
+      "title": "Our Solution",
+      "bullets": ["<proposed solution>", "<key differentiator>", ...]
+    },
+    {
+      "type": "why_now",
+      "title": "Why Now",
+      "bullets": ["<market timing>", "<supporting trend>", ...],
+      "source": "<URL if relevant>"
     },
     {
       "type": "topic",
       "title": "<topic name>",
       "bullets": ["<key insight 1>", "<key insight 2>", ...],
-      "source": "<one of the search result URLs, if relevant>"
+      "source": "<URL or internal doc name>",
+      "source_type": "<web | internal>"
     },
     ...more topic slides...,
     {
@@ -86,20 +187,37 @@ Rules:
 """
 
 
-async def _generate_slide_content(transcript: str, enriched_topics: list[dict]) -> dict:
+async def _generate_slide_content(
+    transcript: str,
+    enriched_topics: list[dict],
+    speaker_context: dict | None = None,
+) -> dict:
     client = AsyncOpenAI(api_key=settings.openai_api_key)
+
+    if speaker_context:
+        company = speaker_context.get("company")
+        company_str = f" from {company}" if company else ""
+        system_prompt = _SYSTEM_PROMPT_BASE.format(
+            speaker_name=speaker_context.get("speaker_name", "The Speaker"),
+            company_str=company_str,
+            audience=speaker_context.get("audience", "the audience"),
+            pitch_summary=speaker_context.get("pitch_summary", ""),
+            tone=speaker_context.get("tone", "professional"),
+        )
+    else:
+        system_prompt = _SYSTEM_PROMPT_GENERIC
 
     topics_text = json.dumps(enriched_topics, indent=2)
     user_msg = (
         f"Meeting transcript:\n{transcript}\n\n"
-        f"Enriched topics (with web search results):\n{topics_text}"
+        f"Enriched topics (with web search results and internal knowledge base results):\n{topics_text}"
     )
 
     response = await client.chat.completions.create(
         model="gpt-4o",
         response_format={"type": "json_object"},
         messages=[
-            {"role": "system", "content": _SYSTEM_PROMPT},
+            {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_msg},
         ],
         temperature=0.4,
@@ -159,7 +277,11 @@ def _render_title_slide(prs: Presentation, slide_data: dict) -> None:
                   align=PP_ALIGN.CENTER)
 
 
-def _render_bullet_slide(prs: Presentation, slide_data: dict, accent_color: RGBColor | None = None) -> None:
+def _render_bullet_slide(
+    prs: Presentation,
+    slide_data: dict,
+    accent_color: RGBColor | None = None,
+) -> None:
     accent_color = accent_color or THEME["accent"]
     slide_layout = prs.slide_layouts[6]
     slide = prs.slides.add_slide(slide_layout)
@@ -194,12 +316,18 @@ def _render_bullet_slide(prs: Presentation, slide_data: dict, accent_color: RGBC
                       font_size=16, bold=False, color=THEME["body_text"])
         y += bullet_h
 
-    # Optional source URL (small, bottom right)
+    # Source citation (bottom right) — colour-coded by source type
     source = slide_data.get("source", "")
+    source_type = slide_data.get("source_type", "web")
     if source:
-        _add_text_box(slide, f"Source: {source}",
+        citation_color = (
+            THEME["kb_accent"] if source_type == "internal"
+            else RGBColor(0x80, 0x90, 0xAA)
+        )
+        prefix = "📁 Internal: " if source_type == "internal" else "🌐 Source: "
+        _add_text_box(slide, f"{prefix}{source}",
                       pad, H - Inches(0.45), W - 2 * pad, Inches(0.35),
-                      font_size=9, bold=False, color=RGBColor(0x80, 0x90, 0xAA),
+                      font_size=9, bold=False, color=citation_color,
                       align=PP_ALIGN.RIGHT)
 
 
@@ -228,20 +356,26 @@ def _render_cta_slide(prs: Presentation, slide_data: dict) -> None:
 # Public API
 # ---------------------------------------------------------------------------
 
-async def generate_pitch_deck(transcript: str, enriched_topics: list[dict]) -> str:
+async def generate_pitch_deck(
+    transcript: str,
+    enriched_topics: list[dict],
+    speaker_context: dict | None = None,
+) -> str:
     """
-    Generate a .pptx pitch deck.
+    Generate a .pptx pitch deck from the speaker's perspective.
 
     Parameters
     ----------
     transcript       : Full meeting transcript text.
-    enriched_topics  : Output of search.enrich_topics().
+    enriched_topics  : Output of search.enrich_topics() — includes both
+                       search_results (web) and kb_results (internal).
+    speaker_context  : Optional dict from speaker_context.extract_speaker_context().
 
     Returns
     -------
     Absolute path to the generated .pptx file.
     """
-    deck_data = await _generate_slide_content(transcript, enriched_topics)
+    deck_data = await _generate_slide_content(transcript, enriched_topics, speaker_context)
 
     prs = Presentation()
     prs.slide_width = Inches(13.33)
@@ -254,9 +388,12 @@ async def generate_pitch_deck(transcript: str, enriched_topics: list[dict]) -> s
             _render_title_slide(prs, slide)
         elif slide_type == "cta":
             _render_cta_slide(prs, slide)
+        elif slide_type == "summary":
+            _render_bullet_slide(prs, slide, accent_color=THEME["highlight"])
+        elif slide_type in ("problem", "solution"):
+            _render_bullet_slide(prs, slide, accent_color=THEME["kb_accent"])
         else:
-            accent = THEME["highlight"] if slide_type == "summary" else THEME["accent"]
-            _render_bullet_slide(prs, slide, accent_color=accent)
+            _render_bullet_slide(prs, slide, accent_color=THEME["accent"])
 
     filename = f"pitch_{uuid.uuid4().hex[:8]}.pptx"
     filepath = os.path.join(OUTPUT_DIR, filename)

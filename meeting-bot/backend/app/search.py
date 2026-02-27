@@ -1,13 +1,18 @@
 """
-Web search for topic enrichment using Serper.dev API.
+Web search for topic enrichment using Serper.dev API, combined with
+optional org knowledge base retrieval.
 
 Serper provides a Google Search JSON API with a generous free tier.
 Docs: https://serper.dev
 """
 
+import logging
+
 import httpx
 
 from .config import settings
+
+log = logging.getLogger(__name__)
 
 SERPER_URL = "https://google.serper.dev/search"
 
@@ -40,14 +45,39 @@ async def search_topic(query: str, num_results: int = 5) -> list[dict]:
     return results
 
 
-async def enrich_topics(topics: list[dict]) -> list[dict]:
+async def enrich_topics(topics: list[dict], use_kb: bool = True) -> list[dict]:
     """
-    For each topic dict (with a "search_query" key), fetch search results
-    and attach them as "search_results".  Returns the enriched topics list.
+    For each topic dict (with a "search_query" key), fetch:
+      - Web search results via Serper.dev → "search_results"
+      - Internal org knowledge base results → "kb_results" (if use_kb=True and KB has docs)
+
+    Returns the enriched topics list.
     """
     enriched = []
     for topic in topics:
         query = topic.get("search_query", topic.get("name", ""))
-        results = await search_topic(query)
-        enriched.append({**topic, "search_results": results})
+
+        # Web search
+        try:
+            web_results = await search_topic(query)
+        except Exception as exc:
+            log.warning("Web search failed for '%s': %s", query, exc)
+            web_results = []
+
+        # Knowledge base retrieval
+        kb_results: list[dict] = []
+        if use_kb:
+            try:
+                from .knowledge_base import query_kb
+                kb_results = await query_kb(query, top_k=3)
+            except Exception as exc:
+                log.warning("KB query failed for '%s': %s", query, exc)
+                kb_results = []
+
+        enriched.append({
+            **topic,
+            "search_results": web_results,
+            "kb_results": kb_results,
+        })
+
     return enriched

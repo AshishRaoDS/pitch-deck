@@ -5,7 +5,7 @@
  *   1. Open microphone → capture PCM via AudioWorklet
  *   2. Open WebSocket to backend
  *   3. Stream audio chunks → receive transcript events
- *   4. Send "stop" command → receive topics + deck_ready events
+ *   4. Send "stop" command → receive progress + topics + deck_ready events
  */
 
 import { useCallback, useRef, useState } from "react";
@@ -24,26 +24,60 @@ export interface SearchResult {
   snippet: string;
 }
 
+export interface KbResult {
+  text: string;
+  source: string;
+  score: number;
+}
+
 export interface Topic {
   name: string;
   description: string;
   search_query: string;
   search_results: SearchResult[];
+  kb_results: KbResult[];
+}
+
+export interface ProgressStep {
+  step: string;
+  message: string;
+  done: boolean;
+}
+
+export interface SpeakerContext {
+  speaker_name: string;
+  company: string | null;
+  role: string | null;
+  pitch_summary: string;
+  audience: string;
+  tone: string;
 }
 
 export interface SessionState {
   status: SessionStatus;
   transcript: string;
   topics: Topic[];
+  progressSteps: ProgressStep[];
   downloadUrl: string | null;
   filename: string | null;
+  speakerContext: SpeakerContext | null;
   error: string | null;
+  elapsedSeconds: number;
 }
 
 const WS_URL = "/ws/session";
 const SAMPLE_RATE = 16_000;
 // How often (ms) we flush the audio buffer to the websocket
 const FLUSH_INTERVAL_MS = 250;
+
+// Ordered list of processing steps for the progress overlay
+const PROCESSING_STEPS = [
+  { step: "transcribing",       label: "Finalising transcript" },
+  { step: "speaker_context",    label: "Identifying speaker context" },
+  { step: "extracting_topics",  label: "Extracting key themes" },
+  { step: "searching",          label: "Researching topics" },
+  { step: "building_deck",      label: "Building pitch deck" },
+];
 
 // ---------------------------------------------------------------------------
 // AudioWorklet processor inline (as a blob URL)
@@ -81,9 +115,12 @@ export function useMeetingSession() {
     status: "idle",
     transcript: "",
     topics: [],
+    progressSteps: [],
     downloadUrl: null,
     filename: null,
+    speakerContext: null,
     error: null,
+    elapsedSeconds: 0,
   });
 
   const wsRef = useRef<WebSocket | null>(null);
@@ -92,6 +129,7 @@ export function useMeetingSession() {
   const streamRef = useRef<MediaStream | null>(null);
   const pcmBufferRef = useRef<ArrayBuffer[]>([]);
   const flushTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const elapsedTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const set = (patch: Partial<SessionState>) =>
     setState((prev) => ({ ...prev, ...patch }));
@@ -99,7 +137,17 @@ export function useMeetingSession() {
   // ---- start ---------------------------------------------------------------
 
   const start = useCallback(async () => {
-    set({ status: "connecting", transcript: "", topics: [], downloadUrl: null, filename: null, error: null });
+    set({
+      status: "connecting",
+      transcript: "",
+      topics: [],
+      progressSteps: [],
+      downloadUrl: null,
+      filename: null,
+      speakerContext: null,
+      error: null,
+      elapsedSeconds: 0,
+    });
 
     // 1. Open WebSocket
     const ws = new WebSocket(WS_URL);
@@ -110,13 +158,26 @@ export function useMeetingSession() {
 
       if (msg.type === "transcript") {
         set({ transcript: msg.full as string });
+      } else if (msg.type === "progress") {
+        const step = msg.step as string;
+        setState((prev) => {
+          // Mark all previous steps as done, current step as in-progress
+          const stepIndex = PROCESSING_STEPS.findIndex((s) => s.step === step);
+          const updatedSteps: ProgressStep[] = PROCESSING_STEPS.map((s, i) => ({
+            step: s.step,
+            message: i === stepIndex ? (msg.message as string) : s.label,
+            done: i < stepIndex,
+          }));
+          return { ...prev, progressSteps: updatedSteps, status: "processing" };
+        });
       } else if (msg.type === "topics") {
-        set({ topics: msg.topics as Topic[], status: "processing" });
+        set({ topics: msg.topics as Topic[] });
       } else if (msg.type === "deck_ready") {
         set({
           status: "done",
           downloadUrl: msg.download_url as string,
           filename: msg.filename as string,
+          speakerContext: (msg.speaker_context as SpeakerContext) ?? null,
         });
       } else if (msg.type === "error") {
         set({ status: "error", error: msg.message as string });
@@ -156,7 +217,6 @@ export function useMeetingSession() {
     flushTimerRef.current = setInterval(() => {
       const chunks = pcmBufferRef.current.splice(0);
       if (!chunks.length) return;
-      // Concatenate all chunks into a single ArrayBuffer
       const total = chunks.reduce((s, b) => s + b.byteLength, 0);
       const merged = new Uint8Array(total);
       let offset = 0;
@@ -169,12 +229,27 @@ export function useMeetingSession() {
       }
     }, FLUSH_INTERVAL_MS);
 
+    // 5. Elapsed time counter
+    elapsedTimerRef.current = setInterval(() => {
+      setState((prev) =>
+        prev.status === "recording"
+          ? { ...prev, elapsedSeconds: prev.elapsedSeconds + 1 }
+          : prev
+      );
+    }, 1000);
+
     set({ status: "recording" });
   }, []);
 
   // ---- stop ----------------------------------------------------------------
 
   const stop = useCallback(() => {
+    // Stop elapsed timer
+    if (elapsedTimerRef.current) {
+      clearInterval(elapsedTimerRef.current);
+      elapsedTimerRef.current = null;
+    }
+
     // Stop flushing
     if (flushTimerRef.current) {
       clearInterval(flushTimerRef.current);
@@ -213,6 +288,19 @@ export function useMeetingSession() {
     }
   }, []);
 
+  // ---- openFile (Electron IPC or fallback) ---------------------------------
+
+  const openFile = useCallback((filePath: string) => {
+    // In Electron, use the IPC bridge exposed by preload.ts
+    const electronAPI = (window as unknown as { electronAPI?: { openFile: (p: string) => void } }).electronAPI;
+    if (electronAPI?.openFile) {
+      electronAPI.openFile(filePath);
+    } else {
+      // Browser fallback: open download URL
+      window.open(filePath, "_blank");
+    }
+  }, []);
+
   // ---- reset ---------------------------------------------------------------
 
   const reset = useCallback(() => {
@@ -222,11 +310,14 @@ export function useMeetingSession() {
       status: "idle",
       transcript: "",
       topics: [],
+      progressSteps: [],
       downloadUrl: null,
       filename: null,
+      speakerContext: null,
       error: null,
+      elapsedSeconds: 0,
     });
   }, []);
 
-  return { state, start, stop, reset };
+  return { state, start, stop, reset, openFile };
 }

@@ -1,11 +1,14 @@
 {
   "name": "meeting-bot-frontend",
   "private": true,
-  "version": "1.0.0",
+  "version": "2.0.0",
   "type": "module",
+  "main": "electron/main.js",
   "scripts": {
     "dev": "vite",
+    "dev:electron": "concurrently \"vite\" \"wait-on http://localhost:5173 && electron .\"",
     "build": "tsc && vite build",
+    "build:electron": "npm run build && electron-builder",
     "preview": "vite preview"
   },
   "dependencies": {
@@ -13,10 +16,43 @@
     "react-dom": "^18.3.1"
   },
   "devDependencies": {
+    "@types/node": "^20.14.0",
     "@types/react": "^18.3.3",
     "@types/react-dom": "^18.3.0",
     "@vitejs/plugin-react": "^4.3.1",
+    "concurrently": "^8.2.2",
+    "electron": "^31.0.0",
+    "electron-builder": "^24.13.3",
     "typescript": "^5.4.5",
-    "vite": "^5.2.12"
+    "vite": "^5.2.12",
+    "wait-on": "^7.2.0"
+  },
+  "build": {
+    "appId": "com.meetingbot.app",
+    "productName": "Meeting Bot",
+    "directories": {
+      "output": "dist-electron"
+    },
+    "mac": {
+      "category": "public.app-category.productivity",
+      "target": "dmg"
+    },
+    "win": {
+      "target": "nsis"
+    },
+    "linux": {
+      "target": "AppImage"
+    },
+    "files": [
+      "dist/**/*",
+      "electron/**/*"
+    ],
+    "extraResources": [
+      {
+        "from": "../backend",
+        "to": "backend",
+        "filter": ["**/*", "!**/__pycache__/**", "!**/*.pyc"]
+      }
+    ]
   }
 }
