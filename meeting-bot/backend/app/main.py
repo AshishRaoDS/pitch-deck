@@ -14,12 +14,13 @@ import logging
 import os
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
 
 from .config import settings
+from .knowledge import extract_text
 from .pitch_deck import OUTPUT_DIR, generate_pitch_deck
 from .search import enrich_topics
 from .topics import extract_topics
@@ -78,6 +79,14 @@ async def api_generate_deck(body: DeckRequest):
     except Exception as exc:
         log.exception("Deck generation failed")
         return JSONResponse(status_code=500, content={"error": str(exc)})
+
+
+@app.post("/api/knowledge")
+async def api_knowledge(file: UploadFile):
+    """Extract text from an uploaded file (.txt, .md, or .pdf)."""
+    content = await file.read()
+    text = await extract_text(file.filename or "", content)
+    return {"text": text}
 
 
 @app.get("/api/download/{filename}")
@@ -147,6 +156,8 @@ async def ws_session(websocket: WebSocket):
                 ctrl = json.loads(message["text"])
 
                 if ctrl.get("type") == "stop":
+                    knowledge = ctrl.get("knowledge", "")
+
                     # Flush remaining audio
                     leftover = await transcriber.flush()
                     if leftover:
@@ -175,7 +186,7 @@ async def ws_session(websocket: WebSocket):
 
                     # Generate pitch deck
                     log.info("Generating pitch deck…")
-                    filepath = await generate_pitch_deck(combined, enriched)
+                    filepath = await generate_pitch_deck(combined, enriched, knowledge)
                     filename = os.path.basename(filepath)
                     await send_json({
                         "type": "deck_ready",

@@ -38,6 +38,8 @@ export interface SessionState {
   downloadUrl: string | null;
   filename: string | null;
   error: string | null;
+  knowledgeText: string;
+  uploadedFiles: string[];
 }
 
 const WS_URL = "/ws/session";
@@ -84,6 +86,8 @@ export function useMeetingSession() {
     downloadUrl: null,
     filename: null,
     error: null,
+    knowledgeText: "",
+    uploadedFiles: [],
   });
 
   const wsRef = useRef<WebSocket | null>(null);
@@ -92,9 +96,26 @@ export function useMeetingSession() {
   const streamRef = useRef<MediaStream | null>(null);
   const pcmBufferRef = useRef<ArrayBuffer[]>([]);
   const flushTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  // Ref so stop() always reads the latest value without stale closure
+  const knowledgeTextRef = useRef<string>("");
 
   const set = (patch: Partial<SessionState>) =>
     setState((prev) => ({ ...prev, ...patch }));
+
+  // ---- uploadKnowledge -----------------------------------------------------
+
+  const uploadKnowledge = useCallback(async (file: File): Promise<void> => {
+    const formData = new FormData();
+    formData.append("file", file);
+    const response = await fetch("/api/knowledge", { method: "POST", body: formData });
+    if (!response.ok) throw new Error(`Upload failed: ${response.statusText}`);
+    const { text } = await response.json() as { text: string };
+    setState((prev) => {
+      const newText = prev.knowledgeText ? prev.knowledgeText + "\n\n" + text : text;
+      knowledgeTextRef.current = newText;
+      return { ...prev, knowledgeText: newText, uploadedFiles: [...prev.uploadedFiles, file.name] };
+    });
+  }, []);
 
   // ---- start ---------------------------------------------------------------
 
@@ -208,7 +229,7 @@ export function useMeetingSession() {
 
     // Tell server to stop and generate deck
     if (wsRef.current?.readyState === WebSocket.OPEN) {
-      wsRef.current.send(JSON.stringify({ type: "stop" }));
+      wsRef.current.send(JSON.stringify({ type: "stop", knowledge: knowledgeTextRef.current }));
       set({ status: "processing" });
     }
   }, []);
@@ -218,6 +239,7 @@ export function useMeetingSession() {
   const reset = useCallback(() => {
     wsRef.current?.close();
     wsRef.current = null;
+    knowledgeTextRef.current = "";
     setState({
       status: "idle",
       transcript: "",
@@ -225,8 +247,10 @@ export function useMeetingSession() {
       downloadUrl: null,
       filename: null,
       error: null,
+      knowledgeText: "",
+      uploadedFiles: [],
     });
   }, []);
 
-  return { state, start, stop, reset };
+  return { state, start, stop, reset, uploadKnowledge };
 }

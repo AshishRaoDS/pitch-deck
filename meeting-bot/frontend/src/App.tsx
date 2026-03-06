@@ -3,10 +3,11 @@ import StatusBadge from "./components/StatusBadge";
 import TranscriptPanel from "./components/TranscriptPanel";
 import TopicsPanel from "./components/TopicsPanel";
 import DeckDownload from "./components/DeckDownload";
+import KnowledgeUpload from "./components/KnowledgeUpload";
 
 export default function App() {
-  const { state, start, stop, reset } = useMeetingSession();
-  const { status, transcript, topics, downloadUrl, filename, error } = state;
+  const { state, start, stop, reset, uploadKnowledge } = useMeetingSession();
+  const { status, transcript, topics, downloadUrl, filename, error, uploadedFiles } = state;
 
   const isRecording = status === "recording";
   const isProcessing = status === "processing" || status === "connecting";
@@ -45,6 +46,11 @@ export default function App() {
         </div>
         <StatusBadge status={status} />
       </header>
+
+      {/* Knowledge upload (idle only) */}
+      {isIdle && (
+        <KnowledgeUpload uploadedFiles={uploadedFiles} onUpload={uploadKnowledge} />
+      )}
 
       {/* Controls */}
       <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>

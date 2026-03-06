@@ -41,9 +41,20 @@ os.makedirs(OUTPUT_DIR, exist_ok=True)
 # ---------------------------------------------------------------------------
 
 _SYSTEM_PROMPT = """\
-You are a professional pitch deck writer. Given a meeting transcript and a list
-of enriched topics (each with web-search results), produce structured content
-for a compelling pitch deck.
+You are a professional pitch deck writer. You will receive a meeting transcript,
+enriched topics (with web-search results), and optionally context extracted from
+local documents the user uploaded before the meeting.
+
+When local document context is provided:
+- Treat it as the PRIMARY source of truth for company facts, product details,
+  positioning, and terminology.
+- Frame every slide around information from those documents, using the transcript
+  to understand what aspects to emphasise and the web-search results only for
+  external market data.
+- Quotes, statistics, and claims should come from the documents whenever possible.
+
+When no local document context is provided, base the deck on the transcript and
+web-search results as usual.
 
 Return a JSON object with this exact shape:
 {
@@ -86,14 +97,16 @@ Rules:
 """
 
 
-async def _generate_slide_content(transcript: str, enriched_topics: list[dict]) -> dict:
+async def _generate_slide_content(transcript: str, enriched_topics: list[dict], knowledge_context: str = "") -> dict:
     client = AsyncOpenAI(api_key=settings.openai_api_key)
 
     topics_text = json.dumps(enriched_topics, indent=2)
-    user_msg = (
-        f"Meeting transcript:\n{transcript}\n\n"
-        f"Enriched topics (with web search results):\n{topics_text}"
-    )
+    parts = []
+    if knowledge_context:
+        parts.append(f"Context from uploaded documents (PRIMARY SOURCE — use this to frame all slides):\n{knowledge_context}")
+    parts.append(f"Meeting transcript:\n{transcript}")
+    parts.append(f"Enriched topics (with web search results):\n{topics_text}")
+    user_msg = "\n\n".join(parts)
 
     response = await client.chat.completions.create(
         model="gpt-4o",
@@ -228,7 +241,7 @@ def _render_cta_slide(prs: Presentation, slide_data: dict) -> None:
 # Public API
 # ---------------------------------------------------------------------------
 
-async def generate_pitch_deck(transcript: str, enriched_topics: list[dict]) -> str:
+async def generate_pitch_deck(transcript: str, enriched_topics: list[dict], knowledge_context: str = "") -> str:
     """
     Generate a .pptx pitch deck.
 
@@ -236,12 +249,13 @@ async def generate_pitch_deck(transcript: str, enriched_topics: list[dict]) -> s
     ----------
     transcript       : Full meeting transcript text.
     enriched_topics  : Output of search.enrich_topics().
+    knowledge_context: Optional text from uploaded local documents.
 
     Returns
     -------
     Absolute path to the generated .pptx file.
     """
-    deck_data = await _generate_slide_content(transcript, enriched_topics)
+    deck_data = await _generate_slide_content(transcript, enriched_topics, knowledge_context)
 
     prs = Presentation()
     prs.slide_width = Inches(13.33)

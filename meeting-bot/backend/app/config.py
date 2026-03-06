@@ -3,8 +3,7 @@ from pydantic_settings import BaseSettings
 
 class Settings(BaseSettings):
     openai_api_key: str
-    serper_api_key: str
-    cors_origins: str = "http://localhost:5173"
+    cors_origins: str = "http://localhost:9999"
 
     class Config:
         env_file = ".env"
