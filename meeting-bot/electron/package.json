@@ -1,0 +1,19 @@
+{
+  "name": "meeting-bot",
+  "version": "1.0.0",
+  "description": "Meeting Bot — record, transcribe, and generate pitch decks",
+  "main": "dist/main.js",
+  "scripts": {
+    "dev": "concurrently \"tsc -w\" \"electron .\"",
+    "build": "tsc",
+    "package:mac": "npm run build && electron-builder --mac",
+    "package:win": "npm run build && electron-builder --win"
+  },
+  "devDependencies": {
+    "@types/node": "^20",
+    "concurrently": "^8",
+    "electron": "^31",
+    "electron-builder": "^24",
+    "typescript": "^5"
+  }
+}

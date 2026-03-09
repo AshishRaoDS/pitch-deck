@@ -8,7 +8,7 @@
  *   4. Send "stop" command → receive topics + deck_ready events
  */
 
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 export type SessionStatus =
   | "idle"
@@ -31,6 +31,8 @@ export interface Topic {
   search_results: SearchResult[];
 }
 
+export type DeckTheme = "midnight" | "slate" | "forest" | "corporate";
+
 export interface SessionState {
   status: SessionStatus;
   transcript: string;
@@ -40,9 +42,10 @@ export interface SessionState {
   error: string | null;
   knowledgeText: string;
   uploadedFiles: string[];
+  buildDeck: boolean | null; // null = not yet chosen (banner shown)
+  theme: DeckTheme;
 }
 
-const WS_URL = "/ws/session";
 const SAMPLE_RATE = 16_000;
 // How often (ms) we flush the audio buffer to the websocket
 const FLUSH_INTERVAL_MS = 250;
@@ -78,7 +81,15 @@ function createWorkletBlobUrl(): string {
 // Hook
 // ---------------------------------------------------------------------------
 
-export function useMeetingSession() {
+export function useMeetingSession(backendPort: number | null = null) {
+  const baseUrlRef = useRef(backendPort ? `http://127.0.0.1:${backendPort}` : "");
+  const wsUrlRef = useRef(backendPort ? `ws://127.0.0.1:${backendPort}/ws/session` : "/ws/session");
+
+  useEffect(() => {
+    baseUrlRef.current = backendPort ? `http://127.0.0.1:${backendPort}` : "";
+    wsUrlRef.current = backendPort ? `ws://127.0.0.1:${backendPort}/ws/session` : "/ws/session";
+  }, [backendPort]);
+
   const [state, setState] = useState<SessionState>({
     status: "idle",
     transcript: "",
@@ -88,6 +99,8 @@ export function useMeetingSession() {
     error: null,
     knowledgeText: "",
     uploadedFiles: [],
+    buildDeck: null,
+    theme: "midnight",
   });
 
   const wsRef = useRef<WebSocket | null>(null);
@@ -96,8 +109,10 @@ export function useMeetingSession() {
   const streamRef = useRef<MediaStream | null>(null);
   const pcmBufferRef = useRef<ArrayBuffer[]>([]);
   const flushTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  // Ref so stop() always reads the latest value without stale closure
+  // Refs so stop() always reads the latest values without stale closures
   const knowledgeTextRef = useRef<string>("");
+  const buildDeckRef = useRef<boolean | null>(null);
+  const themeRef = useRef<DeckTheme>("midnight");
 
   const set = (patch: Partial<SessionState>) =>
     setState((prev) => ({ ...prev, ...patch }));
@@ -107,7 +122,7 @@ export function useMeetingSession() {
   const uploadKnowledge = useCallback(async (file: File): Promise<void> => {
     const formData = new FormData();
     formData.append("file", file);
-    const response = await fetch("/api/knowledge", { method: "POST", body: formData });
+    const response = await fetch(`${baseUrlRef.current}/api/knowledge`, { method: "POST", body: formData });
     if (!response.ok) throw new Error(`Upload failed: ${response.statusText}`);
     const { text } = await response.json() as { text: string };
     setState((prev) => {
@@ -120,10 +135,11 @@ export function useMeetingSession() {
   // ---- start ---------------------------------------------------------------
 
   const start = useCallback(async () => {
-    set({ status: "connecting", transcript: "", topics: [], downloadUrl: null, filename: null, error: null });
+    buildDeckRef.current = null;
+    set({ status: "connecting", transcript: "", topics: [], downloadUrl: null, filename: null, error: null, buildDeck: null });
 
     // 1. Open WebSocket
-    const ws = new WebSocket(WS_URL);
+    const ws = new WebSocket(wsUrlRef.current);
     wsRef.current = ws;
 
     ws.onmessage = (event: MessageEvent) => {
@@ -134,11 +150,11 @@ export function useMeetingSession() {
       } else if (msg.type === "topics") {
         set({ topics: msg.topics as Topic[], status: "processing" });
       } else if (msg.type === "deck_ready") {
-        set({
-          status: "done",
-          downloadUrl: msg.download_url as string,
-          filename: msg.filename as string,
-        });
+        const rawUrl = msg.download_url as string;
+        const downloadUrl = rawUrl.startsWith("http") ? rawUrl : `${baseUrlRef.current}${rawUrl}`;
+        set({ status: "done", downloadUrl, filename: msg.filename as string });
+      } else if (msg.type === "done") {
+        set({ status: "done" });
       } else if (msg.type === "error") {
         set({ status: "error", error: msg.message as string });
       }
@@ -227,11 +243,30 @@ export function useMeetingSession() {
       wsRef.current.send(merged.buffer);
     }
 
-    // Tell server to stop and generate deck
+    // Tell server to stop; pass build_deck preference (default true)
     if (wsRef.current?.readyState === WebSocket.OPEN) {
-      wsRef.current.send(JSON.stringify({ type: "stop", knowledge: knowledgeTextRef.current }));
+      wsRef.current.send(JSON.stringify({
+        type: "stop",
+        knowledge: knowledgeTextRef.current,
+        build_deck: buildDeckRef.current ?? true,
+        theme: themeRef.current,
+      }));
       set({ status: "processing" });
     }
+  }, []);
+
+  // ---- chooseBuildDeck -----------------------------------------------------
+
+  const chooseBuildDeck = useCallback((build: boolean) => {
+    buildDeckRef.current = build;
+    set({ buildDeck: build });
+  }, []);
+
+  // ---- setTheme ------------------------------------------------------------
+
+  const setTheme = useCallback((t: DeckTheme) => {
+    themeRef.current = t;
+    set({ theme: t });
   }, []);
 
   // ---- reset ---------------------------------------------------------------
@@ -240,7 +275,8 @@ export function useMeetingSession() {
     wsRef.current?.close();
     wsRef.current = null;
     knowledgeTextRef.current = "";
-    setState({
+    buildDeckRef.current = null;
+    setState((prev) => ({
       status: "idle",
       transcript: "",
       topics: [],
@@ -249,8 +285,10 @@ export function useMeetingSession() {
       error: null,
       knowledgeText: "",
       uploadedFiles: [],
-    });
+      buildDeck: null,
+      theme: prev.theme, // preserve selected theme across sessions
+    }));
   }, []);
 
-  return { state, start, stop, reset, uploadKnowledge };
+  return { state, start, stop, reset, uploadKnowledge, chooseBuildDeck, setTheme };
 }

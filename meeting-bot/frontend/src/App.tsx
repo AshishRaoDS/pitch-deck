@@ -1,13 +1,105 @@
-import { useMeetingSession } from "./hooks/useMeetingSession";
+import { useEffect, useRef, useState } from "react";
+import { useMeetingSession, type DeckTheme } from "./hooks/useMeetingSession";
 import StatusBadge from "./components/StatusBadge";
 import TranscriptPanel from "./components/TranscriptPanel";
 import TopicsPanel from "./components/TopicsPanel";
 import DeckDownload from "./components/DeckDownload";
 import KnowledgeUpload from "./components/KnowledgeUpload";
+import ApiKeySetup from "./components/ApiKeySetup";
+
+type BootState = "loading" | "needs-key" | "backend-starting" | "ready" | "backend-error";
+type MicStatus = "granted" | "denied" | "not-determined" | "restricted" | null;
 
 export default function App() {
-  const { state, start, stop, reset, uploadKnowledge } = useMeetingSession();
-  const { status, transcript, topics, downloadUrl, filename, error, uploadedFiles } = state;
+  const isElectron = !!window.electronAPI;
+  const [bootState, setBootState] = useState<BootState>(isElectron ? "loading" : "ready");
+  const [backendPort, setBackendPort] = useState<number | null>(null);
+  const [bootError, setBootError] = useState<string | null>(null);
+  const [micStatus, setMicStatus] = useState<MicStatus>(null);
+  const [showCallPrompt, setShowCallPrompt] = useState(false);
+  const statusRef = useRef<string>("idle");
+
+  useEffect(() => {
+    if (!isElectron) return;
+
+    const api = window.electronAPI!;
+
+    api.onBackendReady((port) => {
+      setBackendPort(port);
+      setBootState("ready");
+    });
+
+    api.onBackendError((msg) => {
+      setBootError(msg);
+      setBootState("backend-error");
+    });
+
+    api.hasApiKey().then((has) => {
+      if (!has) {
+        setBootState("needs-key");
+      }
+      // If has key, main process starts backend and fires backend:ready
+    });
+
+    api.getMicStatus().then(setMicStatus);
+
+  }, [isElectron]);
+
+  // Listen for call-detected DOM event dispatched by the preload.
+  // Using a CustomEvent instead of a contextBridge callback is more reliable
+  // because DOM event listeners are never garbage-collected by the bridge.
+  useEffect(() => {
+    if (!isElectron) return;
+    const handler = () => {
+      if (statusRef.current === "idle" || statusRef.current === "error") {
+        setShowCallPrompt(true);
+      }
+    };
+    window.addEventListener("meetingbot:call-detected", handler);
+    return () => window.removeEventListener("meetingbot:call-detected", handler);
+  }, [isElectron]);
+
+  async function handleRequestMic() {
+    const api = window.electronAPI!;
+    const granted = await api.requestMicAccess();
+    const status = await api.getMicStatus();
+    setMicStatus(status ?? (granted ? "granted" : "denied"));
+  }
+
+  const { state, start, stop, reset, uploadKnowledge, chooseBuildDeck, setTheme } = useMeetingSession(backendPort);
+  const { status, transcript, topics, downloadUrl, filename, error, uploadedFiles, buildDeck, theme } = state;
+
+  // Keep ref in sync for use inside the onCallDetected callback
+  useEffect(() => { statusRef.current = status; }, [status]);
+
+  if (bootState === "needs-key") {
+    return (
+      <ApiKeySetup
+        onKeySet={(port) => {
+          setBackendPort(port);
+          setBootState("ready");
+        }}
+      />
+    );
+  }
+
+  if (bootState === "loading" || bootState === "backend-starting") {
+    return (
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "center", height: "100vh", gap: 12, color: "var(--text-muted)" }}>
+        <Spinner />
+        {bootState === "loading" ? "Starting backend…" : "Restarting backend…"}
+      </div>
+    );
+  }
+
+  if (bootState === "backend-error") {
+    return (
+      <div style={{ maxWidth: 480, margin: "80px auto", padding: "32px", background: "#f8717122", border: "1px solid #f87171", borderRadius: 12, color: "#f87171" }}>
+        <strong>Backend failed to start</strong>
+        <p style={{ marginTop: 8, fontSize: 14 }}>{bootError}</p>
+      </div>
+    );
+  }
 
   const isRecording = status === "recording";
   const isProcessing = status === "processing" || status === "connecting";
@@ -47,9 +139,173 @@ export default function App() {
         <StatusBadge status={status} />
       </header>
 
+      {/* Mic permission banner */}
+      {isElectron && micStatus === "not-determined" && (
+        <div
+          style={{
+            background: "#1e3a5f",
+            border: "1px solid #4f8eff",
+            borderRadius: "var(--radius)",
+            padding: "14px 18px",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+            gap: 16,
+            fontSize: 14,
+          }}
+        >
+          <span style={{ color: "var(--text)" }}>
+            Microphone access is required for recording. Allow access to get started.
+          </span>
+          <button
+            onClick={handleRequestMic}
+            style={{
+              background: "var(--accent)",
+              color: "#fff",
+              border: "none",
+              borderRadius: 6,
+              padding: "8px 16px",
+              fontWeight: 600,
+              fontSize: 13,
+              cursor: "pointer",
+              whiteSpace: "nowrap",
+            }}
+          >
+            Allow Microphone
+          </button>
+        </div>
+      )}
+      {isElectron && (micStatus === "denied" || micStatus === "restricted") && (
+        <div
+          style={{
+            background: "#3b1f1f",
+            border: "1px solid #f87171",
+            borderRadius: "var(--radius)",
+            padding: "14px 18px",
+            fontSize: 14,
+            color: "#fca5a5",
+          }}
+        >
+          <strong>Microphone access is blocked.</strong> Open{" "}
+          <strong>System Settings → Privacy &amp; Security → Microphone</strong> and enable access
+          for this app, then restart.
+        </div>
+      )}
+
+      {/* Call detected prompt */}
+      {showCallPrompt && isIdle && (
+        <div
+          style={{
+            background: "#1a2a3a",
+            border: "1px solid #4f8eff",
+            borderRadius: "var(--radius)",
+            padding: "14px 18px",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+            gap: 16,
+            fontSize: 14,
+          }}
+        >
+          <span style={{ color: "var(--text)" }}>
+            It looks like you're on a call. Start transcribing?
+          </span>
+          <div style={{ display: "flex", gap: 8 }}>
+            <button
+              onClick={() => { setShowCallPrompt(false); start(); }}
+              style={{
+                background: "var(--accent)",
+                color: "#fff",
+                border: "none",
+                borderRadius: 6,
+                padding: "7px 14px",
+                fontWeight: 600,
+                fontSize: 13,
+                cursor: "pointer",
+              }}
+            >
+              Yes, transcribe
+            </button>
+            <button
+              onClick={() => setShowCallPrompt(false)}
+              style={{
+                background: "transparent",
+                color: "var(--text-muted)",
+                border: "1px solid var(--border)",
+                borderRadius: 6,
+                padding: "7px 14px",
+                fontWeight: 600,
+                fontSize: 13,
+                cursor: "pointer",
+              }}
+            >
+              Dismiss
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* Knowledge upload (idle only) */}
       {isIdle && (
         <KnowledgeUpload uploadedFiles={uploadedFiles} onUpload={uploadKnowledge} />
+      )}
+
+      {/* Deck theme selector (idle only) */}
+      {isIdle && (
+        <ThemeSelector selected={theme} onChange={setTheme} />
+      )}
+
+      {/* Pitch deck choice banner — appears when recording starts */}
+      {isRecording && buildDeck === null && (
+        <div
+          style={{
+            background: "#1a2a1a",
+            border: "1px solid #4ade80",
+            borderRadius: "var(--radius)",
+            padding: "14px 18px",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+            gap: 16,
+            fontSize: 14,
+          }}
+        >
+          <span style={{ color: "var(--text)" }}>
+            Build a pitch deck from this meeting?
+          </span>
+          <div style={{ display: "flex", gap: 8 }}>
+            <button
+              onClick={() => chooseBuildDeck(true)}
+              style={{
+                background: "#4ade80",
+                color: "#052e16",
+                border: "none",
+                borderRadius: 6,
+                padding: "7px 14px",
+                fontWeight: 600,
+                fontSize: 13,
+                cursor: "pointer",
+              }}
+            >
+              Yes, build deck
+            </button>
+            <button
+              onClick={() => chooseBuildDeck(false)}
+              style={{
+                background: "transparent",
+                color: "#86efac",
+                border: "1px solid #4ade8066",
+                borderRadius: 6,
+                padding: "7px 14px",
+                fontWeight: 600,
+                fontSize: 13,
+                cursor: "pointer",
+              }}
+            >
+              Transcribe only
+            </button>
+          </div>
+        </div>
       )}
 
       {/* Controls */}
@@ -61,7 +317,7 @@ export default function App() {
         )}
         {isRecording && (
           <Button variant="danger" onClick={stop} icon={<StopIcon />}>
-            Stop & Generate
+            {buildDeck === false ? "Stop & Save Transcript" : "Stop & Generate"}
           </Button>
         )}
         {(isDone || status === "error") && (
@@ -220,5 +476,74 @@ function ResetIcon() {
       <polyline points="1 4 1 10 7 10" />
       <path d="M3.51 15a9 9 0 1 0 .49-4.72L1 10" />
     </svg>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Theme selector
+// ---------------------------------------------------------------------------
+
+const THEME_OPTIONS: { value: DeckTheme; label: string; accent: string; bg: string }[] = [
+  { value: "midnight", label: "Midnight",  accent: "#4F8EFF", bg: "#0F172A" },
+  { value: "slate",    label: "Slate",     accent: "#7C3AED", bg: "#0F0F1A" },
+  { value: "forest",   label: "Forest",    accent: "#10B981", bg: "#0D1F12" },
+  { value: "corporate",label: "Corporate", accent: "#1E3A5F", bg: "#FFFFFF" },
+];
+
+function ThemeSelector({ selected, onChange }: { selected: DeckTheme; onChange: (t: DeckTheme) => void }) {
+  return (
+    <div>
+      <p style={{ color: "var(--text-muted)", fontSize: 13, marginBottom: 10, fontWeight: 500 }}>
+        Deck theme
+      </p>
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+        {THEME_OPTIONS.map((opt) => {
+          const isSelected = selected === opt.value;
+          return (
+            <button
+              key={opt.value}
+              onClick={() => onChange(opt.value)}
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: 8,
+                padding: "8px 14px",
+                borderRadius: 8,
+                border: isSelected ? `2px solid ${opt.accent}` : "2px solid var(--border)",
+                background: isSelected ? `${opt.accent}18` : "var(--surface)",
+                color: isSelected ? opt.accent : "var(--text-muted)",
+                fontWeight: isSelected ? 600 : 400,
+                fontSize: 13,
+                cursor: "pointer",
+                transition: "all 0.15s",
+              }}
+            >
+              {/* mini slide preview swatch */}
+              <span
+                style={{
+                  display: "inline-flex",
+                  width: 28,
+                  height: 18,
+                  borderRadius: 3,
+                  background: opt.bg,
+                  border: `1px solid ${opt.accent}55`,
+                  position: "relative",
+                  overflow: "hidden",
+                  flexShrink: 0,
+                }}
+              >
+                <span style={{
+                  position: "absolute",
+                  left: 0, top: 0,
+                  width: "100%", height: 3,
+                  background: opt.accent,
+                }} />
+              </span>
+              {opt.label}
+            </button>
+          );
+        })}
+      </div>
+    </div>
   );
 }

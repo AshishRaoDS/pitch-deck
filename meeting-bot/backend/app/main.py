@@ -157,6 +157,8 @@ async def ws_session(websocket: WebSocket):
 
                 if ctrl.get("type") == "stop":
                     knowledge = ctrl.get("knowledge", "")
+                    build_deck = ctrl.get("build_deck", True)
+                    theme = ctrl.get("theme", "midnight")
 
                     # Flush remaining audio
                     leftover = await transcriber.flush()
@@ -184,15 +186,19 @@ async def ws_session(websocket: WebSocket):
 
                     await send_json({"type": "topics", "topics": enriched})
 
-                    # Generate pitch deck
-                    log.info("Generating pitch deck…")
-                    filepath = await generate_pitch_deck(combined, enriched, knowledge)
-                    filename = os.path.basename(filepath)
-                    await send_json({
-                        "type": "deck_ready",
-                        "filename": filename,
-                        "download_url": f"/api/download/{filename}",
-                    })
+                    if build_deck:
+                        # Generate pitch deck
+                        log.info("Generating pitch deck…")
+                        filepath = await generate_pitch_deck(combined, enriched, knowledge, theme)
+                        filename = os.path.basename(filepath)
+                        await send_json({
+                            "type": "deck_ready",
+                            "filename": filename,
+                            "download_url": f"/api/download/{filename}",
+                        })
+                    else:
+                        log.info("Skipping deck generation (build_deck=false)")
+                        await send_json({"type": "done"})
                     break
 
     except WebSocketDisconnect:

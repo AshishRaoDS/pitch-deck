@@ -10,6 +10,7 @@ Flow:
 import io
 import json
 import os
+import tempfile
 import textwrap
 import uuid
 
@@ -22,18 +23,45 @@ from pptx.util import Inches, Pt
 from .config import settings
 
 # ---------------------------------------------------------------------------
-# Constants / theme
+# Constants / themes
 # ---------------------------------------------------------------------------
 
-THEME = {
-    "bg": RGBColor(0x0F, 0x17, 0x2A),       # deep navy
-    "accent": RGBColor(0x4F, 0x8E, 0xFF),    # bright blue
-    "title_text": RGBColor(0xFF, 0xFF, 0xFF),
-    "body_text": RGBColor(0xD0, 0xD8, 0xEA),
-    "highlight": RGBColor(0x4F, 0xE3, 0xC0), # teal
+THEMES: dict[str, dict] = {
+    "midnight": {
+        "bg":         RGBColor(0x0F, 0x17, 0x2A),  # deep navy
+        "accent":     RGBColor(0x4F, 0x8E, 0xFF),  # bright blue
+        "title_text": RGBColor(0xFF, 0xFF, 0xFF),
+        "body_text":  RGBColor(0xD0, 0xD8, 0xEA),
+        "highlight":  RGBColor(0x4F, 0xE3, 0xC0),  # teal
+        "cta_text":   RGBColor(0x0F, 0x17, 0x2A),  # same as bg (dark on bright accent)
+    },
+    "slate": {
+        "bg":         RGBColor(0x0F, 0x0F, 0x1A),  # near-black charcoal
+        "accent":     RGBColor(0x7C, 0x3A, 0xED),  # violet
+        "title_text": RGBColor(0xFF, 0xFF, 0xFF),
+        "body_text":  RGBColor(0xC4, 0xB5, 0xFD),  # light purple
+        "highlight":  RGBColor(0xF5, 0x9E, 0x0B),  # amber
+        "cta_text":   RGBColor(0xFF, 0xFF, 0xFF),  # white on violet
+    },
+    "forest": {
+        "bg":         RGBColor(0x0D, 0x1F, 0x12),  # dark forest green
+        "accent":     RGBColor(0x10, 0xB9, 0x81),  # emerald
+        "title_text": RGBColor(0xFF, 0xFF, 0xFF),
+        "body_text":  RGBColor(0xA7, 0xF3, 0xD0),  # light mint
+        "highlight":  RGBColor(0x84, 0xCC, 0x16),  # lime
+        "cta_text":   RGBColor(0x0D, 0x1F, 0x12),  # same as bg (dark on emerald)
+    },
+    "corporate": {
+        "bg":         RGBColor(0xFF, 0xFF, 0xFF),  # white
+        "accent":     RGBColor(0x1E, 0x3A, 0x5F),  # dark navy
+        "title_text": RGBColor(0x1A, 0x1A, 0x2A),  # near-black
+        "body_text":  RGBColor(0x37, 0x41, 0x51),  # dark grey
+        "highlight":  RGBColor(0x25, 0x63, 0xEB),  # blue
+        "cta_text":   RGBColor(0xFF, 0xFF, 0xFF),  # white on dark navy
+    },
 }
 
-OUTPUT_DIR = "/tmp/meeting-bot-decks"
+OUTPUT_DIR = os.path.join(tempfile.gettempdir(), "meeting-bot-decks")
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 # ---------------------------------------------------------------------------
@@ -147,10 +175,10 @@ def _add_text_box(slide, text: str, left, top, width, height,
     run.font.color.rgb = color
 
 
-def _render_title_slide(prs: Presentation, slide_data: dict) -> None:
+def _render_title_slide(prs: Presentation, slide_data: dict, theme: dict) -> None:
     slide_layout = prs.slide_layouts[6]  # blank
     slide = prs.slides.add_slide(slide_layout)
-    _set_slide_background(slide, THEME["bg"])
+    _set_slide_background(slide, theme["bg"])
 
     W, H = prs.slide_width, prs.slide_height
     pad = Inches(0.8)
@@ -158,25 +186,25 @@ def _render_title_slide(prs: Presentation, slide_data: dict) -> None:
     # Accent bar at top
     bar = slide.shapes.add_shape(1, 0, 0, W, Inches(0.12))
     bar.fill.solid()
-    bar.fill.fore_color.rgb = THEME["accent"]
+    bar.fill.fore_color.rgb = theme["accent"]
     bar.line.fill.background()
 
     _add_text_box(slide, slide_data.get("title", "Meeting Pitch"),
                   pad, H * 0.3, W - 2 * pad, Inches(1.5),
-                  font_size=40, bold=True, color=THEME["title_text"],
+                  font_size=40, bold=True, color=theme["title_text"],
                   align=PP_ALIGN.CENTER)
 
     _add_text_box(slide, slide_data.get("subtitle", ""),
                   pad, H * 0.55, W - 2 * pad, Inches(1),
-                  font_size=20, bold=False, color=THEME["highlight"],
+                  font_size=20, bold=False, color=theme["highlight"],
                   align=PP_ALIGN.CENTER)
 
 
-def _render_bullet_slide(prs: Presentation, slide_data: dict, accent_color: RGBColor | None = None) -> None:
-    accent_color = accent_color or THEME["accent"]
+def _render_bullet_slide(prs: Presentation, slide_data: dict, theme: dict, accent_color: RGBColor | None = None) -> None:
+    accent_color = accent_color or theme["accent"]
     slide_layout = prs.slide_layouts[6]
     slide = prs.slides.add_slide(slide_layout)
-    _set_slide_background(slide, THEME["bg"])
+    _set_slide_background(slide, theme["bg"])
 
     W, H = prs.slide_width, prs.slide_height
     pad = Inches(0.6)
@@ -184,7 +212,7 @@ def _render_bullet_slide(prs: Presentation, slide_data: dict, accent_color: RGBC
     # Title
     _add_text_box(slide, slide_data.get("title", ""),
                   pad, Inches(0.35), W - 2 * pad, Inches(0.8),
-                  font_size=28, bold=True, color=THEME["title_text"])
+                  font_size=28, bold=True, color=theme["title_text"])
 
     # Divider line
     line = slide.shapes.add_shape(1, pad, Inches(1.25), W - 2 * pad, Inches(0.04))
@@ -204,7 +232,7 @@ def _render_bullet_slide(prs: Presentation, slide_data: dict, accent_color: RGBC
 
         _add_text_box(slide, bullet,
                       pad + Inches(0.28), y, W - 2 * pad - Inches(0.28), bullet_h,
-                      font_size=16, bold=False, color=THEME["body_text"])
+                      font_size=16, bold=False, color=theme["body_text"])
         y += bullet_h
 
     # Optional source URL (small, bottom right)
@@ -216,24 +244,24 @@ def _render_bullet_slide(prs: Presentation, slide_data: dict, accent_color: RGBC
                       align=PP_ALIGN.RIGHT)
 
 
-def _render_cta_slide(prs: Presentation, slide_data: dict) -> None:
+def _render_cta_slide(prs: Presentation, slide_data: dict, theme: dict) -> None:
     slide_layout = prs.slide_layouts[6]
     slide = prs.slides.add_slide(slide_layout)
-    _set_slide_background(slide, THEME["accent"])
+    _set_slide_background(slide, theme["accent"])
 
     W, H = prs.slide_width, prs.slide_height
     pad = Inches(0.8)
 
     _add_text_box(slide, slide_data.get("title", "Next Steps"),
                   pad, Inches(0.5), W - 2 * pad, Inches(0.9),
-                  font_size=32, bold=True, color=THEME["bg"])
+                  font_size=32, bold=True, color=theme["cta_text"])
 
     bullets: list[str] = slide_data.get("bullets", [])
     y = Inches(1.5)
     for bullet in bullets[:6]:
         _add_text_box(slide, f"→  {bullet}",
                       pad, y, W - 2 * pad, Inches(0.6),
-                      font_size=17, bold=False, color=THEME["bg"])
+                      font_size=17, bold=False, color=theme["cta_text"])
         y += Inches(0.65)
 
 
@@ -241,7 +269,12 @@ def _render_cta_slide(prs: Presentation, slide_data: dict) -> None:
 # Public API
 # ---------------------------------------------------------------------------
 
-async def generate_pitch_deck(transcript: str, enriched_topics: list[dict], knowledge_context: str = "") -> str:
+async def generate_pitch_deck(
+    transcript: str,
+    enriched_topics: list[dict],
+    knowledge_context: str = "",
+    theme: str = "midnight",
+) -> str:
     """
     Generate a .pptx pitch deck.
 
@@ -250,12 +283,15 @@ async def generate_pitch_deck(transcript: str, enriched_topics: list[dict], know
     transcript       : Full meeting transcript text.
     enriched_topics  : Output of search.enrich_topics().
     knowledge_context: Optional text from uploaded local documents.
+    theme            : One of "midnight", "slate", "forest", "corporate".
 
     Returns
     -------
     Absolute path to the generated .pptx file.
     """
     deck_data = await _generate_slide_content(transcript, enriched_topics, knowledge_context)
+
+    t = THEMES.get(theme, THEMES["midnight"])
 
     prs = Presentation()
     prs.slide_width = Inches(13.33)
@@ -265,12 +301,12 @@ async def generate_pitch_deck(transcript: str, enriched_topics: list[dict], know
         slide_type = slide.get("type", "bullet")
 
         if slide_type == "title":
-            _render_title_slide(prs, slide)
+            _render_title_slide(prs, slide, t)
         elif slide_type == "cta":
-            _render_cta_slide(prs, slide)
+            _render_cta_slide(prs, slide, t)
         else:
-            accent = THEME["highlight"] if slide_type == "summary" else THEME["accent"]
-            _render_bullet_slide(prs, slide, accent_color=accent)
+            accent = t["highlight"] if slide_type == "summary" else t["accent"]
+            _render_bullet_slide(prs, slide, t, accent_color=accent)
 
     filename = f"pitch_{uuid.uuid4().hex[:8]}.pptx"
     filepath = os.path.join(OUTPUT_DIR, filename)
