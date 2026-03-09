@@ -2,14 +2,43 @@ import { useEffect, useRef } from "react";
 
 interface Props {
   text: string;
+  editable?: boolean;
+  onChange?: (value: string) => void;
+  disabled?: boolean;
 }
 
-export default function TranscriptPanel({ text }: Props) {
+export default function TranscriptPanel({ text, editable = false, onChange, disabled = false }: Props) {
   const bottomRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
+    if (editable) return;
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [text]);
+  }, [editable, text]);
+
+  if (editable) {
+    return (
+      <textarea
+        value={text}
+        onChange={(e) => onChange?.(e.target.value)}
+        disabled={disabled}
+        placeholder="Review and edit the transcript before generating the pitch deck…"
+        style={{
+          width: "100%",
+          minHeight: 320,
+          resize: "vertical",
+          background: "var(--surface)",
+          border: "1px solid var(--border)",
+          borderRadius: "var(--radius)",
+          padding: 20,
+          fontSize: 15,
+          lineHeight: 1.7,
+          color: "var(--text)",
+          fontFamily: "inherit",
+          outline: "none",
+        }}
+      />
+    );
+  }
 
   return (
     <div

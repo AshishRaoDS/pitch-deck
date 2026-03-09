@@ -5,7 +5,8 @@
  *   1. Open microphone → capture PCM via AudioWorklet
  *   2. Open WebSocket to backend
  *   3. Stream audio chunks → receive transcript events
- *   4. Send "stop" command → receive topics + deck_ready events
+ *   4. Send "stop" command → receive a final transcript draft for review
+ *   5. Save the edited transcript and request deck generation over HTTP
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -14,7 +15,8 @@ export type SessionStatus =
   | "idle"
   | "connecting"
   | "recording"
-  | "processing"
+  | "reviewing"
+  | "generating"
   | "done"
   | "error";
 
@@ -35,14 +37,17 @@ export type DeckTheme = "midnight" | "slate" | "forest" | "corporate";
 
 export interface SessionState {
   status: SessionStatus;
-  transcript: string;
+  transcriptDraft: string;
+  finalTranscript: string | null;
+  hasUnsavedTranscriptChanges: boolean;
+  reviewStatus: "live" | "review" | "ready";
   topics: Topic[];
   downloadUrl: string | null;
   filename: string | null;
   error: string | null;
   knowledgeText: string;
   uploadedFiles: string[];
-  buildDeck: boolean | null; // null = not yet chosen (banner shown)
+  isGeneratingDeck: boolean;
   theme: DeckTheme;
 }
 
@@ -92,14 +97,17 @@ export function useMeetingSession(backendPort: number | null = null) {
 
   const [state, setState] = useState<SessionState>({
     status: "idle",
-    transcript: "",
+    transcriptDraft: "",
+    finalTranscript: null,
+    hasUnsavedTranscriptChanges: false,
+    reviewStatus: "live",
     topics: [],
     downloadUrl: null,
     filename: null,
     error: null,
     knowledgeText: "",
     uploadedFiles: [],
-    buildDeck: null,
+    isGeneratingDeck: false,
     theme: "midnight",
   });
 
@@ -111,8 +119,8 @@ export function useMeetingSession(backendPort: number | null = null) {
   const flushTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   // Refs so stop() always reads the latest values without stale closures
   const knowledgeTextRef = useRef<string>("");
-  const buildDeckRef = useRef<boolean | null>(null);
   const themeRef = useRef<DeckTheme>("midnight");
+  const allowTranscriptReadyOverwriteRef = useRef<boolean>(false);
 
   const set = (patch: Partial<SessionState>) =>
     setState((prev) => ({ ...prev, ...patch }));
@@ -135,8 +143,19 @@ export function useMeetingSession(backendPort: number | null = null) {
   // ---- start ---------------------------------------------------------------
 
   const start = useCallback(async () => {
-    buildDeckRef.current = null;
-    set({ status: "connecting", transcript: "", topics: [], downloadUrl: null, filename: null, error: null, buildDeck: null });
+    allowTranscriptReadyOverwriteRef.current = false;
+    set({
+      status: "connecting",
+      transcriptDraft: "",
+      finalTranscript: null,
+      hasUnsavedTranscriptChanges: false,
+      reviewStatus: "live",
+      topics: [],
+      downloadUrl: null,
+      filename: null,
+      error: null,
+      isGeneratingDeck: false,
+    });
 
     // 1. Open WebSocket
     const ws = new WebSocket(wsUrlRef.current);
@@ -146,15 +165,25 @@ export function useMeetingSession(backendPort: number | null = null) {
       const msg = JSON.parse(event.data as string);
 
       if (msg.type === "transcript") {
-        set({ transcript: msg.full as string });
-      } else if (msg.type === "topics") {
-        set({ topics: msg.topics as Topic[], status: "processing" });
-      } else if (msg.type === "deck_ready") {
-        const rawUrl = msg.download_url as string;
-        const downloadUrl = rawUrl.startsWith("http") ? rawUrl : `${baseUrlRef.current}${rawUrl}`;
-        set({ status: "done", downloadUrl, filename: msg.filename as string });
-      } else if (msg.type === "done") {
-        set({ status: "done" });
+        setState((prev) => {
+          if (prev.reviewStatus !== "live") return prev;
+          return { ...prev, transcriptDraft: msg.full as string };
+        });
+      } else if (msg.type === "transcript_ready") {
+        setState((prev) => {
+          if (!allowTranscriptReadyOverwriteRef.current) {
+            return prev;
+          }
+          allowTranscriptReadyOverwriteRef.current = false;
+          return {
+            ...prev,
+            status: "reviewing",
+            transcriptDraft: msg.full as string,
+            finalTranscript: null,
+            hasUnsavedTranscriptChanges: true,
+            reviewStatus: "review",
+          };
+        });
       } else if (msg.type === "error") {
         set({ status: "error", error: msg.message as string });
       }
@@ -212,6 +241,8 @@ export function useMeetingSession(backendPort: number | null = null) {
   // ---- stop ----------------------------------------------------------------
 
   const stop = useCallback(() => {
+    allowTranscriptReadyOverwriteRef.current = true;
+
     // Stop flushing
     if (flushTimerRef.current) {
       clearInterval(flushTimerRef.current);
@@ -243,24 +274,94 @@ export function useMeetingSession(backendPort: number | null = null) {
       wsRef.current.send(merged.buffer);
     }
 
-    // Tell server to stop; pass build_deck preference (default true)
+    // Tell the server to flush any remaining audio and finish the transcript.
     if (wsRef.current?.readyState === WebSocket.OPEN) {
       wsRef.current.send(JSON.stringify({
         type: "stop",
-        knowledge: knowledgeTextRef.current,
-        build_deck: buildDeckRef.current ?? true,
-        theme: themeRef.current,
       }));
-      set({ status: "processing" });
+      setState((prev) => ({
+        ...prev,
+        status: "reviewing",
+        hasUnsavedTranscriptChanges: !!prev.transcriptDraft.trim(),
+        reviewStatus: "review",
+        error: null,
+      }));
     }
   }, []);
 
-  // ---- chooseBuildDeck -----------------------------------------------------
+  // ---- updateTranscriptDraft ----------------------------------------------
 
-  const chooseBuildDeck = useCallback((build: boolean) => {
-    buildDeckRef.current = build;
-    set({ buildDeck: build });
+  const updateTranscriptDraft = useCallback((transcriptDraft: string) => {
+    allowTranscriptReadyOverwriteRef.current = false;
+    setState((prev) => ({
+      ...prev,
+      transcriptDraft,
+      hasUnsavedTranscriptChanges: transcriptDraft !== (prev.finalTranscript ?? ""),
+      reviewStatus: transcriptDraft === (prev.finalTranscript ?? "") && prev.finalTranscript !== null ? "ready" : "review",
+    }));
   }, []);
+
+  // ---- saveTranscriptDraft -------------------------------------------------
+
+  const saveTranscriptDraft = useCallback(() => {
+    allowTranscriptReadyOverwriteRef.current = false;
+    setState((prev) => ({
+      ...prev,
+      finalTranscript: prev.transcriptDraft,
+      hasUnsavedTranscriptChanges: false,
+      reviewStatus: "ready",
+    }));
+  }, []);
+
+  // ---- generateDeck --------------------------------------------------------
+
+  const generateDeck = useCallback(async () => {
+    if (!state.finalTranscript || state.hasUnsavedTranscriptChanges) {
+      return;
+    }
+
+    set({ status: "generating", isGeneratingDeck: true, error: null, topics: [], downloadUrl: null, filename: null });
+
+    try {
+      const response = await fetch(`${baseUrlRef.current}/api/generate-deck`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          transcript: state.finalTranscript,
+          knowledge_text: knowledgeTextRef.current,
+          theme: themeRef.current,
+        }),
+      });
+
+      const payload = await response.json() as {
+        error?: string;
+        topics?: Topic[];
+        filename?: string;
+        download_url?: string;
+      };
+
+      if (!response.ok) {
+        throw new Error(payload.error || `Deck generation failed: ${response.statusText}`);
+      }
+
+      const rawUrl = payload.download_url ?? "";
+      const downloadUrl = rawUrl.startsWith("http") ? rawUrl : `${baseUrlRef.current}${rawUrl}`;
+
+      set({
+        status: "done",
+        isGeneratingDeck: false,
+        topics: payload.topics ?? [],
+        filename: payload.filename ?? null,
+        downloadUrl,
+      });
+    } catch (err) {
+      set({
+        status: "reviewing",
+        isGeneratingDeck: false,
+        error: err instanceof Error ? err.message : "Deck generation failed.",
+      });
+    }
+  }, [state.finalTranscript, state.hasUnsavedTranscriptChanges]);
 
   // ---- setTheme ------------------------------------------------------------
 
@@ -275,20 +376,33 @@ export function useMeetingSession(backendPort: number | null = null) {
     wsRef.current?.close();
     wsRef.current = null;
     knowledgeTextRef.current = "";
-    buildDeckRef.current = null;
+    allowTranscriptReadyOverwriteRef.current = false;
     setState((prev) => ({
       status: "idle",
-      transcript: "",
+      transcriptDraft: "",
+      finalTranscript: null,
+      hasUnsavedTranscriptChanges: false,
+      reviewStatus: "live",
       topics: [],
       downloadUrl: null,
       filename: null,
       error: null,
       knowledgeText: "",
       uploadedFiles: [],
-      buildDeck: null,
+      isGeneratingDeck: false,
       theme: prev.theme, // preserve selected theme across sessions
     }));
   }, []);
 
-  return { state, start, stop, reset, uploadKnowledge, chooseBuildDeck, setTheme };
+  return {
+    state,
+    start,
+    stop,
+    reset,
+    uploadKnowledge,
+    updateTranscriptDraft,
+    saveTranscriptDraft,
+    generateDeck,
+    setTheme,
+  };
 }

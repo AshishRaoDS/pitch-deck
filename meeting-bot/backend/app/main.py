@@ -4,8 +4,8 @@ FastAPI application entry point.
 Endpoints
 ---------
 GET  /                      Health check
-WS   /ws/session            WebSocket: real-time audio → transcript → topics
-POST /api/generate-deck     Generate pitch deck from transcript + topics
+WS   /ws/session            WebSocket: real-time audio → transcript draft
+POST /api/generate-deck     Generate topics + pitch deck from final transcript
 GET  /api/download/{name}   Download a generated .pptx file
 """
 
@@ -63,19 +63,25 @@ async def health():
 
 class DeckRequest(BaseModel):
     transcript: str
-    enriched_topics: list[dict]
+    knowledge_text: str = ""
+    theme: str = "midnight"
 
 
 @app.post("/api/generate-deck")
 async def api_generate_deck(body: DeckRequest):
     """
-    Generate a .pptx pitch deck from the full transcript and enriched topics.
-    Returns the filename that can be fetched via /api/download/{filename}.
+    Generate topics, web research, and a .pptx pitch deck from the final transcript.
     """
     try:
-        filepath = await generate_pitch_deck(body.transcript, body.enriched_topics)
+        topics = await extract_topics(body.transcript)
+        enriched = await enrich_topics(topics)
+        filepath = await generate_pitch_deck(body.transcript, enriched, body.knowledge_text, body.theme)
         filename = os.path.basename(filepath)
-        return {"filename": filename, "download_url": f"/api/download/{filename}"}
+        return {
+            "topics": enriched,
+            "filename": filename,
+            "download_url": f"/api/download/{filename}",
+        }
     except Exception as exc:
         log.exception("Deck generation failed")
         return JSONResponse(status_code=500, content={"error": str(exc)})
@@ -116,12 +122,11 @@ async def ws_session(websocket: WebSocket):
     ------------------
     Client → Server (binary):  raw PCM audio bytes (16-bit, 16 kHz, mono)
     Client → Server (text):    JSON control messages
-        {"type": "stop"}       – end session, trigger topic extraction + search
+        {"type": "stop"}       – end session and finalize transcript capture
 
     Server → Client (text):    JSON event messages
         {"type": "transcript", "text": "...", "full": "..."}
-        {"type": "topics",     "topics": [...]}
-        {"type": "deck_ready", "filename": "...", "download_url": "..."}
+        {"type": "transcript_ready", "full": "..."}
         {"type": "error",      "message": "..."}
     """
     await websocket.accept()
@@ -156,10 +161,6 @@ async def ws_session(websocket: WebSocket):
                 ctrl = json.loads(message["text"])
 
                 if ctrl.get("type") == "stop":
-                    knowledge = ctrl.get("knowledge", "")
-                    build_deck = ctrl.get("build_deck", True)
-                    theme = ctrl.get("theme", "midnight")
-
                     # Flush remaining audio
                     leftover = await transcriber.flush()
                     if leftover:
@@ -176,29 +177,7 @@ async def ws_session(websocket: WebSocket):
                         await send_json({"type": "error", "message": "No transcript captured."})
                         break
 
-                    # Extract topics
-                    log.info("Extracting topics…")
-                    topics = await extract_topics(combined)
-
-                    # Enrich topics with web search
-                    log.info("Running web searches…")
-                    enriched = await enrich_topics(topics)
-
-                    await send_json({"type": "topics", "topics": enriched})
-
-                    if build_deck:
-                        # Generate pitch deck
-                        log.info("Generating pitch deck…")
-                        filepath = await generate_pitch_deck(combined, enriched, knowledge, theme)
-                        filename = os.path.basename(filepath)
-                        await send_json({
-                            "type": "deck_ready",
-                            "filename": filename,
-                            "download_url": f"/api/download/{filename}",
-                        })
-                    else:
-                        log.info("Skipping deck generation (build_deck=false)")
-                        await send_json({"type": "done"})
+                    await send_json({"type": "transcript_ready", "full": combined})
                     break
 
     except WebSocketDisconnect:

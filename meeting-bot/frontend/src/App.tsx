@@ -66,8 +66,31 @@ export default function App() {
     setMicStatus(status ?? (granted ? "granted" : "denied"));
   }
 
-  const { state, start, stop, reset, uploadKnowledge, chooseBuildDeck, setTheme } = useMeetingSession(backendPort);
-  const { status, transcript, topics, downloadUrl, filename, error, uploadedFiles, buildDeck, theme } = state;
+  const {
+    state,
+    start,
+    stop,
+    reset,
+    uploadKnowledge,
+    updateTranscriptDraft,
+    saveTranscriptDraft,
+    generateDeck,
+    setTheme,
+  } = useMeetingSession(backendPort);
+  const {
+    status,
+    transcriptDraft,
+    finalTranscript,
+    hasUnsavedTranscriptChanges,
+    reviewStatus,
+    topics,
+    downloadUrl,
+    filename,
+    error,
+    uploadedFiles,
+    isGeneratingDeck,
+    theme,
+  } = state;
 
   // Keep ref in sync for use inside the onCallDetected callback
   useEffect(() => { statusRef.current = status; }, [status]);
@@ -102,9 +125,13 @@ export default function App() {
   }
 
   const isRecording = status === "recording";
-  const isProcessing = status === "processing" || status === "connecting";
+  const isGenerating = status === "generating";
+  const isConnecting = status === "connecting";
+  const isReviewing = status === "reviewing";
   const isDone = status === "done";
   const isIdle = status === "idle" || status === "error";
+  const canSaveTranscript = isReviewing && transcriptDraft.trim().length > 0;
+  const canGenerateDeck = isReviewing && reviewStatus === "ready" && !hasUnsavedTranscriptChanges && !!finalTranscript;
 
   return (
     <div
@@ -255,59 +282,6 @@ export default function App() {
         <ThemeSelector selected={theme} onChange={setTheme} />
       )}
 
-      {/* Pitch deck choice banner — appears when recording starts */}
-      {isRecording && buildDeck === null && (
-        <div
-          style={{
-            background: "#1a2a1a",
-            border: "1px solid #4ade80",
-            borderRadius: "var(--radius)",
-            padding: "14px 18px",
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "space-between",
-            gap: 16,
-            fontSize: 14,
-          }}
-        >
-          <span style={{ color: "var(--text)" }}>
-            Build a pitch deck from this meeting?
-          </span>
-          <div style={{ display: "flex", gap: 8 }}>
-            <button
-              onClick={() => chooseBuildDeck(true)}
-              style={{
-                background: "#4ade80",
-                color: "#052e16",
-                border: "none",
-                borderRadius: 6,
-                padding: "7px 14px",
-                fontWeight: 600,
-                fontSize: 13,
-                cursor: "pointer",
-              }}
-            >
-              Yes, build deck
-            </button>
-            <button
-              onClick={() => chooseBuildDeck(false)}
-              style={{
-                background: "transparent",
-                color: "#86efac",
-                border: "1px solid #4ade8066",
-                borderRadius: 6,
-                padding: "7px 14px",
-                fontWeight: 600,
-                fontSize: 13,
-                cursor: "pointer",
-              }}
-            >
-              Transcribe only
-            </button>
-          </div>
-        </div>
-      )}
-
       {/* Controls */}
       <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
         {isIdle && (
@@ -317,21 +291,48 @@ export default function App() {
         )}
         {isRecording && (
           <Button variant="danger" onClick={stop} icon={<StopIcon />}>
-            {buildDeck === false ? "Stop & Save Transcript" : "Stop & Generate"}
+            Stop Recording
           </Button>
+        )}
+        {isReviewing && (
+          <>
+            <Button variant="secondary" onClick={saveTranscriptDraft} icon={<SaveIcon />} disabled={!canSaveTranscript}>
+              Save Transcript
+            </Button>
+            <Button variant="primary" onClick={generateDeck} icon={<DeckIcon />} disabled={!canGenerateDeck}>
+              Generate Pitch Deck
+            </Button>
+          </>
         )}
         {(isDone || status === "error") && (
           <Button variant="secondary" onClick={reset} icon={<ResetIcon />}>
             New Session
           </Button>
         )}
-        {isProcessing && (
+        {(isConnecting || isGenerating) && (
           <div style={{ display: "flex", alignItems: "center", gap: 10, color: "var(--text-muted)", fontSize: 14 }}>
             <Spinner />
-            {status === "connecting" ? "Connecting to server…" : "Analysing, searching web, building deck…"}
+            {isConnecting ? "Connecting to server…" : "Generating topics, research, and deck…"}
           </div>
         )}
       </div>
+
+      {isReviewing && (
+        <div
+          style={{
+            background: reviewStatus === "ready" ? "#10261d" : "#2b2112",
+            border: `1px solid ${reviewStatus === "ready" ? "#34d39966" : "#fbbf2466"}`,
+            borderRadius: "var(--radius)",
+            padding: "14px 18px",
+            fontSize: 14,
+            color: reviewStatus === "ready" ? "#a7f3d0" : "#fde68a",
+          }}
+        >
+          {reviewStatus === "live" && "Finalising the transcript…"}
+          {reviewStatus === "review" && "Review and edit the transcript. Save it when you're ready for pitch deck creation."}
+          {reviewStatus === "ready" && "Transcript saved. You can continue editing or generate the pitch deck now."}
+        </div>
+      )}
 
       {/* Error */}
       {error && (
@@ -350,12 +351,24 @@ export default function App() {
       )}
 
       {/* Transcript */}
-      {(transcript || isRecording) && (
+      {(transcriptDraft || isRecording || isReviewing || isGenerating || isDone) && (
         <section>
           <h2 style={{ fontSize: 16, fontWeight: 600, marginBottom: 10, color: "var(--text-muted)" }}>
-            Live Transcript
+            {isRecording ? "Live Transcript" : "Review Transcript"}
           </h2>
-          <TranscriptPanel text={transcript} />
+          <TranscriptPanel
+            text={transcriptDraft}
+            editable={isReviewing}
+            onChange={updateTranscriptDraft}
+            disabled={isGeneratingDeck}
+          />
+          {isReviewing && (
+            <div style={{ marginTop: 10, fontSize: 13, color: hasUnsavedTranscriptChanges ? "#fbbf24" : "var(--text-muted)" }}>
+              {hasUnsavedTranscriptChanges
+                ? "Unsaved transcript changes. Save transcript before generating the deck."
+                : "Saved transcript is ready for pitch deck creation."}
+            </div>
+          )}
         </section>
       )}
 
@@ -390,6 +403,7 @@ interface ButtonProps {
   onClick: () => void;
   icon?: React.ReactNode;
   children: React.ReactNode;
+  disabled?: boolean;
 }
 
 const btnStyles: Record<ButtonProps["variant"], React.CSSProperties> = {
@@ -410,10 +424,11 @@ const btnStyles: Record<ButtonProps["variant"], React.CSSProperties> = {
   },
 };
 
-function Button({ variant, onClick, icon, children }: ButtonProps) {
+function Button({ variant, onClick, icon, children, disabled = false }: ButtonProps) {
   return (
     <button
       onClick={onClick}
+      disabled={disabled}
       style={{
         display: "inline-flex",
         alignItems: "center",
@@ -424,10 +439,16 @@ function Button({ variant, onClick, icon, children }: ButtonProps) {
         fontSize: 15,
         border: "none",
         transition: "opacity 0.15s",
+        cursor: disabled ? "not-allowed" : "pointer",
+        opacity: disabled ? 0.5 : 1,
         ...btnStyles[variant],
       }}
-      onMouseEnter={(e) => ((e.target as HTMLElement).style.opacity = "0.85")}
-      onMouseLeave={(e) => ((e.target as HTMLElement).style.opacity = "1")}
+      onMouseEnter={(e) => {
+        if (!disabled) (e.target as HTMLElement).style.opacity = "0.85";
+      }}
+      onMouseLeave={(e) => {
+        if (!disabled) (e.target as HTMLElement).style.opacity = "1";
+      }}
     >
       {icon}
       {children}
@@ -466,6 +487,28 @@ function StopIcon() {
   return (
     <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
       <rect x="4" y="4" width="16" height="16" rx="2" />
+    </svg>
+  );
+}
+
+function SaveIcon() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z" />
+      <polyline points="17 21 17 13 7 13 7 21" />
+      <polyline points="7 3 7 8 15 8" />
+    </svg>
+  );
+}
+
+function DeckIcon() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+      <rect x="3" y="4" width="18" height="14" rx="2" />
+      <path d="M8 20h8" />
+      <path d="M12 18v2" />
+      <path d="M7 9h10" />
+      <path d="M7 13h6" />
     </svg>
   );
 }

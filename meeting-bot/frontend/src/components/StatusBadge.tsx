@@ -4,7 +4,8 @@ const labels: Record<SessionStatus, string> = {
   idle: "Idle",
   connecting: "Connecting…",
   recording: "Recording",
-  processing: "Processing…",
+  reviewing: "Reviewing",
+  generating: "Generating…",
   done: "Done",
   error: "Error",
 };
@@ -13,7 +14,8 @@ const colors: Record<SessionStatus, string> = {
   idle: "#94a3b8",
   connecting: "#fbbf24",
   recording: "#f87171",
-  processing: "#818cf8",
+  reviewing: "#38bdf8",
+  generating: "#818cf8",
   done: "#34d399",
   error: "#f87171",
 };
